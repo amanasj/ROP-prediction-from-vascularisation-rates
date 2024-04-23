@@ -1,8 +1,8 @@
 ######################## ROP-prediction-from-vascularisation-rates ##############################
 
-Use of the following code in publications is permitted on condition that a citation of the authors journal submission (TBC...) is provided:
+Use of the following code in publications is permitted on condition that a citation of the authors journal submission (doi:pending) is provided:
 
-"title here" by Emer Chang1, Amandeep Josan, Ravi Purohit, Sher A Aslam, Caroline Hartley, Chetan K Patel, Kanmin Xue
+"Ultra-widefield imaging-based prediction of retinopathy of prematurity outcomes: a novel approach using temporal vascularisation rate" by Emer Chang, Amandeep Josan, Ravi Purohit, Sher A Aslam, Caroline Hartley, Chetan K Patel, Kanmin Xue
 
 Please also cite the appropriate packages contained within this code (ggplot2,lme4 etc...)
 

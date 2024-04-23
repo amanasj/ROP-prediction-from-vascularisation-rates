@@ -63,15 +63,15 @@ library(randomForest)
 
 ```{r, message=FALSE, warning=FALSE}
 
-tvl_train_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_1904_2.xlsx"), 
+tvl_train_data_orig <- suppressMessages(read_excel(("XXXXXXX.xlsx"), 
                                         sheet = 1, 
-                                        range = "a1:h409", col_names = T))
+                                        range = "a1:h400", col_names = T))
 
-tvl_antivegf_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 antivegf clean.xlsx"), 
+tvl_antivegf_data_orig <- suppressMessages(read_excel(("XXXXXXX.xlsx"),
                                         sheet = 1, 
                                         range = "a1:n257", col_names = T))
 
-tvl_test_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 validation clean.xlsx"), 
+tvl_test_data_orig <- suppressMessages(read_excel(("XXXXXXX.xlsx"),
                                         sheet = 1, 
                                         range = "a1:h95", col_names = T))
 
@@ -641,8 +641,8 @@ So now that we know slope for ROP group AB is significantly diff to slope for gr
 
 
 ```{r}
-# add a simple TVL ~ age slope column to dataframe. Go back to the original dataframes from Emer with the R & L on the ID labels. 
-## NOTE:- our previous work here and the antivegf file looks at TVR being the coefficient if the linear mixed model whereas here TVR is manually fitted and evaluated as the coefficient of PMA (age). The two versions of the TVR calc are similar but slighty different. This one is more appropriate for predictions using gradient boosting since this TVR does not involve GA and BW at all so can be evaluated as a predictive measure independently. In all other instances TVR is calculated as the coefficient of PMA and controlling for GA and BW in the LMM. I guess since we are claculating TVR on a per patient basis here we are also controlling for GA and BW so I guess the two versions of TVR are probably the same?  
+# add a simple TVL ~ age slope column to dataframe. Go back to the original dataframes with the R & L on the ID labels. 
+## NOTE:- our previous work here and the antivegf file looks at TVR being the coefficient of the linear mixed model whereas here TVR is manually fitted and evaluated as the coefficient of PMA (age). The two versions of the TVR calc are similar but slighty different. This one is more appropriate for predictions using gradient boosting since this TVR does not involve GA and BW at all so can be evaluated as a predictive measure independently. In all other instances TVR is calculated as the coefficient of PMA and controlling for GA and BW in the LMM. I guess since we are calculating TVR on a per patient basis here we are also controlling for GA and BW so I guess the two versions of TVR are probably the same?  
 
 ### add a slope column
 df <- na.omit(df)
@@ -681,16 +681,10 @@ d_slope <- na.omit(d2)
 <br>
 
 
-
-This section has been substantially updated. Previously, the predictions of the Random Forest model somewhat went against the finding of the linear mixed model above. specifically in the LMM above we found significant differences in TVR between groups AB vs group C, however, when I constructed a random forest based predictive model to take advantage of this difference in TVR, the RF model did not demonstrate that TVR was a good predictor at all.. in fact it appeared to be detrimental to predictions!  
-
-
-After some investigations I think I have identified the cause of this contradiction. I generally trust the LMM results over that of the RF since the LMM is a fully visible model built from the ground up whereas the RF predictive model is a bit of a black box. Hence I've gone back to the RF model to see what is going wrong with the predictive ability of TVR. 
-
-I've realised that the original RF model is perhaps not an accurate model as I somewhat ignored the repeated measures aspect of the data (right eye & left eyes taken from each patient), Whereas in the LMM I did take this into account. I originally ignored this aspect as it didn't seem like that there was an easy solution to using random forests for repeated measures data, however, after Caroline's mention of XGboost I went back and looked further into tree boosting as a possibility as it has been used to mitigate the random components of a model whilst boosting the fixed effects. 
+Random forests do not take into account the repeated measures aspect of the data (right eye & left eyes taken from each patient), whereas in the LMM I did take this into account. This limitation of random forests cannot be ignored with our data so use XGboost instead. Ttree boosting has been used to mitigate the random components of a model whilst boosting the fixed effects. 
 
 
-I have found a very useful package called GPboost which takes things a little further by combining tree boosting with grouped random effects (such that we can now use data from right and left eyes for each patient an take this repeated measures per patient into account).
+The R package `GPboost` takes things a little further by combining tree boosting with grouped random effects (such that we can now use data from right and left eyes for each patient an take this repeated measures per patient into account).
 
 
 
@@ -722,18 +716,12 @@ gp_data$ROP <- as.numeric(gp_data$ROP)-1
 gp_model1 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
 gp_model2 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
 gp_model3 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
-gp_model4 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
-gp_model5 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
-gp_model6 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
-gp_model7 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+
 
 fixed1 <- model.matrix(ROP ~ TVR+GA+BW, data = gp_data)
 fixed2 <- model.matrix(ROP ~ GA+BW, data = gp_data)
-fixed3 <- model.matrix(ROP ~ BW+TVR, data = gp_data)
-fixed4 <- model.matrix(ROP ~ TVR, data = gp_data)
-fixed5 <- model.matrix(ROP ~ BW, data = gp_data)
-fixed6 <- model.matrix(ROP ~ GA, data = gp_data)
-fixed7 <- model.matrix(ROP ~ 1, data = gp_data)
+fixed3 <- model.matrix(ROP ~ TVR, data = gp_data)
+
 
 
 
@@ -746,10 +734,7 @@ re_params <- list(optimizer_cov = "gradient_descent")
 gp_model1$set_optim_params(params=re_params)
 gp_model2$set_optim_params(params=re_params)
 gp_model3$set_optim_params(params=re_params)
-gp_model4$set_optim_params(params=re_params)
-gp_model5$set_optim_params(params=re_params)
-gp_model6$set_optim_params(params=re_params)
-gp_model7$set_optim_params(params=re_params)
+
 #Use trace = TRUE to monitor convergence:
 re_params <- list(trace = TRUE)
 ```
@@ -802,20 +787,8 @@ bst1 <- gpboost(data = fixed1, label = gp_data$ROP, gp_model = gp_model1, nround
 bst2 <- gpboost(data = fixed2, label = gp_data$ROP, gp_model = gp_model2, nrounds = 127, 
                learning_rate = 0.5, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=1, 
                 verbose = 1)
-bst3 <- gpboost(data = fixed3, label = gp_data$ROP, gp_model = gp_model3, nrounds = 675,
-               learning_rate = 0.1, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=5, 
-               verbose = 1)
-bst4 <- gpboost(data = fixed4, label = gp_data$ROP, gp_model = gp_model4, nrounds = 100,
+bst3 <- gpboost(data = fixed4, label = gp_data$ROP, gp_model = gp_model4, nrounds = 100,
                learning_rate = 0.1, min_data_in_leaf = 10, max_depth=2, seed=22, lambda_l2=0, 
-               verbose = 1)
-bst5 <- gpboost(data = fixed5, label = gp_data$ROP, gp_model = gp_model5, nrounds = 750,
-               learning_rate = 0.1, min_data_in_leaf = 5, max_depth=3, seed=22, lambda_l2=5, 
-               verbose = 1)
-bst6 <- gpboost(data = fixed6, label = gp_data$ROP, gp_model = gp_model6, nrounds = 77,
-               learning_rate = 0.5, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=1, 
-               verbose = 1)
-bst7 <- gpboost(data = fixed7, label = gp_data$ROP, gp_model = gp_model6, nrounds = 50,
-               learning_rate = 1, min_data_in_leaf = 500, max_depth=2, seed=22, lambda_l2=0, 
                verbose = 1)
 
 
@@ -826,14 +799,7 @@ pred2 <- predict(bst2, data = fixed2, group_data_pred=gp_data$ID,
                 predict_var = TRUE, pred_latent = T)
 pred3 <- predict(bst3, data = fixed3, group_data_pred=gp_data$ID,
                 predict_var = TRUE, pred_latent = T)
-pred4 <- predict(bst4, data = fixed4, group_data_pred=gp_data$ID,
-                predict_var = TRUE, pred_latent = T)
-pred5 <- predict(bst5, data = fixed5, group_data_pred=gp_data$ID,
-                predict_var = TRUE, pred_latent = T)
-pred6 <- predict(bst6, data = fixed6, group_data_pred=gp_data$ID,
-                predict_var = TRUE, pred_latent = T)
-pred7 <- predict(bst7, data = fixed7, group_data_pred=gp_data$ID,
-                predict_var = TRUE, pred_latent = T)
+
 
 
 #pred$mu # predicted latent mean
@@ -848,17 +814,6 @@ actual <- as.numeric(actual)-1
 roc_object1 <- roc(actual, pred1$fixed_effect, auc=T)
 roc_object2 <- roc(actual, pred2$fixed_effect, auc=T)
 roc_object3 <- roc(actual, pred3$fixed_effect, auc=T)
-roc_object4 <- roc(actual, pred4$fixed_effect, auc=T)
-roc_object5 <- roc(actual, pred5$fixed_effect, auc=T)
-roc_object6 <- roc(actual, pred6$fixed_effect, auc=T)
-roc_object7 <- roc(actual, pred7$fixed_effect, auc=T)
-# roc_object1 <- roc(actual, pred1$response_mean, auc=T)
-# roc_object2 <- roc(actual, pred2$response_mean, auc=T)
-# roc_object3 <- roc(actual, pred3$response_mean, auc=T)
-# roc_object4 <- roc(actual, pred4$response_mean, auc=T)
-# roc_object5 <- roc(actual, pred5$response_mean, auc=T)
-# roc_object6 <- roc(actual, pred6$response_mean, auc=T)
-
 
 
 ```
@@ -869,19 +824,12 @@ par(pty="s")
 {
 plot(roc_object1, col="darkblue", print.auc =F, main = "")
 plot(roc_object2, print.auc=F, col="darkred", add=TRUE, lty=3, lwd=4)
-#plot(roc_object3, print.auc=F, col="mistyrose4", add=TRUE, lty=2, lwd=2)
-plot(roc_object4, print.auc=F, col="darkgreen", add=TRUE, lty=2, lwd=2)
-#plot(roc_object5, print.auc=F, col="lightblue3", add=TRUE, lty=2, lwd=2)
-#plot(roc_object6, print.auc=F, col="orange", add=TRUE, lty=2, lwd=2)
-#plot(roc_object7, print.auc=F, col="yellow4", add=TRUE, lty=2, lwd=2)
+plot(roc_object3, print.auc=F, col="darkgreen", add=TRUE, lty=2, lwd=2)
+
 
 text(0.3, 0.25, paste("Model 3: (BW+GA+TVR)  AUC = ", round(roc_object1$auc, 2)), col="darkblue", cex=0.7)
 text(0.3, 0.3, paste("Model 2: (BW+GA)  AUC = ", round(roc_object2$auc, 2)), col="darkred", cex=0.7)
-#text(0.3, 0.25, paste("Model 3: (BW+TVR only)  AUC = ", round(roc_object3$auc, 2)), col="mistyrose4", cex=0.7)
-text(0.3, 0.35, paste("Model 1: (TVR only)  AUC = ", round(roc_object4$auc, 2)), col="darkgreen", cex=0.7)
-#text(0.1, 0.15, paste("Model 5: (BW only)  AUC = ", round(roc_object5$auc, 2)), col="lightblue3", cex=0.7)
-#text(0.1, 0.1, paste("Model 6: (GA only)  AUC = ", round(roc_object6$auc, 2)), col="orange", cex=0.7)
-#text(0.1, 0.05, paste("Model 7: (no covariates)  AUC = ", round(roc_object7$auc, 2)), col="yellow4", cex=0.7)
+text(0.3, 0.35, paste("Model 1: (TVR only)  AUC = ", round(roc_object3$auc, 2)), col="darkgreen", cex=0.7)
 } 
 
 ```
@@ -919,10 +867,10 @@ barplot(height = percent_gain,
 
 <br>
 
-So using gradient tree boosting rather than random forests takes the nested nature of the data into account in a similar way that the linear mixed modelling took the nesting into account. As such the results make much more sense that before (when I preformed a simple random forest).
+So using gradient tree boosting rather than random forests takes the nested nature of the data into account in a similar way that the linear mixed modelling took the nesting into account.
 
 
-As before, this model again shows that BW is overwhelmingly the strongest predictor. Again, we also have TVR adding some contribution.  
+This model shows that BW is overwhelmingly the strongest predictor. Again, we also have TVR adding some contribution.  
 
 
 Hence, GA and TVR add very marginal benefits to the predictive model compared to just BW alone, however, GA and BW suffer from moderate collinearity (see VIF below), whereas, TVR is a relatively independent measure with little collinearity with BW or GA. Hence I think we can argue that it has great potential as an independent predictive biomarker for ROP classification.
@@ -940,7 +888,7 @@ Hence, GA and TVR add very marginal benefits to the predictive model compared to
 
 <br>
 
-Let's use Emer's withheld dataset to make predictions to test the random forest model 
+Let's use the withheld dataset to make predictions to test the gradient boosting model 
 
 <br>
 
@@ -989,12 +937,7 @@ test_df$TVR <- round(test_df$TVR, digits = 2)
 
 
 
-(Note:- we are removing patient 85 due to their complex nature (as per Kanmin's suggestion) )
 
- 
-```{r}
-test_df <- test_df[!grepl("85", test_df$ID),]
-```
 
 ```{r}
 actual_result <- c("AB","AB","AB","AB","AB","AB","AB","AB","AB","C","C","C","AB",
@@ -1014,9 +957,8 @@ actual_result <- as.factor(actual_result)
 ##### Generate ROC curves for the 3 cases where RF model has BW+GA+TVR vs GA+BW vs TVR only
 fixed1 <- model.matrix( ~ TVR+GA+BW, data = test_df)
 fixed2 <- model.matrix( ~ GA+BW, data = test_df)
-fixed3 <- model.matrix( ~ BW+TVR, data = test_df)
-fixed4 <- model.matrix( ~ TVR, data = test_df)
-fixed5 <- model.matrix( ~ BW, data = test_df)
+fixed3 <- model.matrix( ~ TVR, data = test_df)
+
 
 
 predictions1 <- predict(bst1, 
@@ -1034,16 +976,7 @@ predictions3 <- predict(bst3,
                 group_data_pred=test_df$ID,
                 pred_latent = T,
                 )
-predictions4 <- predict(bst4,
-                data = fixed4,
-                group_data_pred=test_df$ID,
-                pred_latent = T,
-                )
-predictions5 <- predict(bst5,
-                data = fixed5,
-                group_data_pred=test_df$ID,
-                pred_latent = T,
-                )
+
 
 
 predicted_classes1 <- ifelse(predictions1$fixed_effect < -0.2, "AB", "C")
@@ -1054,17 +987,10 @@ predicted_classes2 <- ifelse(predictions2$fixed_effect < -0.9, "AB", "C")
 predicted_classes2 <- as.factor(predicted_classes2)
 cm2 <- confusionMatrix(predicted_classes2, actual_result)
 
-predicted_classes3 <- ifelse(predictions3$fixed_effect < 0.5, "AB", "C")
+predicted_classes3 <- ifelse(predictions3$fixed_effect < -0.8, "AB", "C")
 predicted_classes3 <- as.factor(predicted_classes3)
 cm3 <- confusionMatrix(predicted_classes3, actual_result)
 
-predicted_classes4 <- ifelse(predictions4$fixed_effect < -0.8, "AB", "C")
-predicted_classes4 <- as.factor(predicted_classes4)
-cm4 <- confusionMatrix(predicted_classes4, actual_result)
-
-predicted_classes5 <- ifelse(predictions5$fixed_effect < 1.2, "AB", "C")
-predicted_classes5 <- as.factor(predicted_classes5)
-cm5 <- confusionMatrix(predicted_classes5, actual_result)
 ```
 
 ```{r echo=FALSE}
@@ -1074,11 +1000,9 @@ names(test_df)[names(test_df) == 'TVR'] <- 'TVR (D-F/week)'
 
 results <- cbind.data.frame(test_df, 
                             "Actual ROP \ngroup" = actual_result,
-                            "TVR only" = predicted_classes4,
+                            "TVR only" = predicted_classes3,
                             "BW+GA" = predicted_classes2,
                             "Prediction Model\n(BW+GA+TVR)" = predicted_classes1
-                            #"BW+TVR" = predicted_classes3,
-                            #"BW" = predicted_classes5
                             )
 rownames(results) <- NULL
 
@@ -1119,18 +1043,11 @@ BW+GA
 ```{r out.width="50%"}
 cm2$table
 ```
-BW+TVR
-```{r out.width="50%"}
-cm3$table
-```
 TVR
 ```{r out.width="50%"}
 cm4$table
 ```
-BW
-```{r out.width="50%"}
-cm5$table
-```
+
 
 
 

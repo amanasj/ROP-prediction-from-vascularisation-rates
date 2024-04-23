@@ -1,0 +1,766 @@
+---
+title: "ROP - Temporal vessel growth - antiVEGF analysis"
+author: "Aman Josan"
+date: "`r format(Sys.time(), '%d/%m/%y')`"
+output:
+  html_document: 
+    self_contained: yes
+    
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{=html}
+<style>
+.column-left{
+  float: left;
+  width: 50%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 50%;
+  text-align: right;
+}
+</style>
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = F,
+	message = FALSE,
+	warning = FALSE,
+	cache.rebuild = TRUE,
+	comment = NA
+)
+library(tidyverse)
+library(optmatch)
+library(openxlsx)
+library(readxl)
+library(lme4)
+library(stats)
+library(ggpmisc)
+library(effects)
+library(gtools)
+library(patchwork)
+library(here)
+library(flexplot)
+library(lmerTest)
+library(glmmTMB)
+library(interactions)
+library(sjPlot)
+library(jtools)
+library(performance)
+library(emmeans)
+library(kableExtra)
+library(caret)
+library(pROC)
+library(car)
+library(dlookr)
+library(ggstatsplot)
+library(viridis)
+library(ggpmisc)
+library(directlabels)
+library(wesanderson)
+```
+
+
+<br><br>
+
+
+
+
+```{r, message=FALSE, warning=FALSE}
+
+df_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 antivegf clean.xlsx"), 
+                                        sheet = 1, 
+                                        range = "a1:n257", col_names = T))
+
+```
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+### define a custom theme 
+custom_theme <-  theme_bw() + 
+                 theme(axis.text.x=element_text(size=14, colour="black"),
+                       axis.text.y=element_text(size=14, colour="black"),
+                       axis.title= element_text(size=20, face="bold"),
+                       plot.title = element_text(size = 20, face = "bold"), 
+                       strip.text.x = element_text(size = 14),
+                       #legend.position="none",
+                       panel.grid.major = element_blank(), 
+                       panel.grid.minor = element_blank(), 
+                       axis.line = element_line(colour="black"),
+                       legend.title = element_text(size=14),
+                       legend.text = element_text(size=14),
+                       legend.key.size = unit(0.6, "cm")
+                 )
+```
+
+
+
+```{r}
+df <- df_orig
+
+df$eye[df$eye==0] <- "OD"
+df$eye[df$eye==1] <- "OS"
+
+# remove the FD disc columns
+df$`FD fovea centre-disc centre  distance (mm)` <- NULL
+df$`temporal-disc centre (mm)` <- NULL
+df$`ROP status` <- NULL
+
+# rearrange columns
+df <- df[c(1,4,2,3,6,7,5)]
+
+# rename columns to match the training dataset
+colnames(df) <- c("ID","eye","GA","BW","age","TVL","age_at_antivegf") #"nscans_post_tx","weeks after tx","nscans_pre_tx","weeks before tx")
+
+# then convert columns to a factor or numeric
+## NB - age is actually postmenstrual age (i.e. age since birth measured in weeks)
+df$ID <- as.factor(df$ID)
+df$eye <- as.factor(df$eye)
+df$age <- as.numeric(df$age)
+
+```
+
+
+
+
+```{r, message=FALSE, warning=FALSE}
+d <- df
+d <- na.omit(d)
+
+## store dataframe with ID column for future use
+d_labelled <- d$ID
+```
+
+
+```{r include=FALSE}
+### add a 'pre or post tx' column
+d$treatment <- d$age - d$age_at_antivegf
+
+d$treatment <- ifelse(d$treatment<=0, "pre", "post") 
+d$treatment <- factor(d$treatment)
+```
+
+
+
+```{r include=FALSE}
+### Some data manipulation to label the pre vs post points properly
+####################################################################################################
+### add another treatment column (tx) but this time 0=pre 1=post and make the day of treatment = 1
+d$tx <- ""
+d$tx[d$treatment =="pre"] <- 0
+d$tx[d$treatment =="post"] <- 1
+d$tx <- as.numeric(d$tx)
+
+
+### find last instance of "pre" for each patient for each eye
+d %>% 
+   dplyr::group_by(ID, eye) %>% arrange(treatment) %>%
+   dplyr::slice(tail(row_number(), 1)) -> tx_transition
+tx_transition %>% filter(treatment != "post") -> tx_transition
+tx_transition$treatment <- "post" 
+tx_transition$tx <- 1
+### join duplicated last pre visit onto d and rename to post. This will include the tx day as a pre and post visit for linear regression purposes
+d <- rbind.data.frame(d, tx_transition)
+d %>% group_by(ID) %>% group_by(eye) 
+d <- d[with(d, order(ID, eye, age)), ]
+d$tx <- NULL
+```
+
+
+```{r}
+## store this dataframe for later use
+d_later <- d
+```
+
+
+```{r include=FALSE}
+# Now remove R & L labels from the ID column
+d$ID <- (gsub('[a-zA-Z]', '', d$ID))
+d$ID <- factor(d$ID)
+```
+
+
+```{r include=FALSE}
+##################################################################################################
+### find the max age where still pre-treatment. Make this the point of treatment. 
+d %>% 
+    group_by(ID) %>%
+    filter(treatment=='pre') %>%
+    group_by(ID) %>%
+    filter(age == max(age)) -> tx_df
+
+###################################################################################################
+
+```
+
+
+<br>
+
+
+#### Let's look at the first few rows of data
+
+<br>
+
+
+```{r}
+### print table of studies
+head(d, n=25) %>%
+  kbl(caption = "") %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size=12) %>%
+  kable_styling("striped")
+```
+
+
+
+
+
+
+<br><br>
+
+
+
+Here I am fitted regression lines instead of simply connecting points. The blue dot shows the point of treatment (or closest visit prior to treatment if no observations were made at the point of treatment).
+
+
+<br>
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+d_ggplot <- d
+d_ggplot$ID <- as.character(d_ggplot$ID)
+
+labels <- c("av1","av2","av3","av4","av5","av6","av7","av8","av9","av10","av11","av12","av13",
+            "av14","av15","av16","av17","av18","av19","av20")
+names(labels) <- c("100","101","102","103","104","105","106","107","108","109","110","111",
+                    "86","87","89","93","94","95","98","99")
+
+
+tx_plot2 <- 
+    ggplot(d_ggplot, aes(x = age, y = TVL, colour=eye, shape=treatment,
+                         group=interaction(eye, treatment))) + 
+    geom_smooth(method = "lm", 
+                formula = y~x,
+                alpha=0.4, 
+                linewidth=0.7,
+                se=F) +
+    geom_point(size=1.6) +
+    coord_cartesian(ylim = c(0, 7)) +
+    facet_wrap(~ID, ncol = 4, scales = "free") + #, labeller = labeller(ID=labels)) +
+    xlab(expression(paste(bold("Post-menstrual age"), "  (weeks)"))) +
+    ylab(expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)"))) +
+    custom_theme +
+    theme(legend.position="top") +
+    theme(aspect.ratio=0.7) +
+    scale_colour_manual(values= wes_palette("GrandBudapest1", n = 2)) +
+    geom_point(data = tx_df, aes(x = age, y = TVL), color="blue", size=2, shape=8) +
+  theme(strip.background = element_blank(), strip.text.x = element_blank())
+
+
+#tiff(filename = "plot2.tiff", width=6000, height=4000, res = 600)
+tx_plot2
+#dev.off()
+#summary(d)
+```
+
+
+<br><br>
+
+
+
+
+```{r include=FALSE}
+library(ggeffects)
+
+new <- c("av1","av2","av3","av4","av5","av6","av7","av8","av9","av10","av11","av12","av13",
+            "av14","av15","av16","av17","av18","av19","av20")
+old <- c("100","101","102","103","104","105","106","107","108","109","110","111",
+                    "86","87","89","93","94","95","98","99")
+
+d$ID <- factor(d$ID, labels = (new))
+  
+lmm1 <- lmer(TVL ~ age*treatment*eye + GA + BW + (age|ID/eye), data = d)
+
+#Predict
+pred1 <- ggpredict(lmm1, terms = c("age", "treatment", "eye"))
+```
+
+<br>
+
+Or to show the difference another way
+
+<br>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width='90%'}
+pred1$group <- factor(pred1$group, levels = c("pre","post"))
+d$treatment <- factor(d$treatment, levels = c("pre","post"))
+
+ggplot() +
+  facet_wrap(~facet) +
+  geom_point(data=d, aes(x=age, y=TVL, colour=treatment)) +    
+  geom_line(data=pred1, aes(x=x, y=predicted, colour=group), linewidth=1.1) +
+  geom_ribbon(data=pred1, aes(x, ymin=conf.low, ymax=conf.high, 
+                              group=interaction(facet, group),
+                              fill=group), alpha=0.3) +
+  custom_theme +
+  scale_color_manual(values=c("#F8766D", "#00BFC4")) +
+  scale_fill_manual(values=c("#F8766D", "#00BFC4")) +
+  guides(fill="none") +
+  labs(color='ROP group') +
+  theme(aspect.ratio = 1.1) +
+  ggtitle("") +
+  xlab(expression(paste(bold("Post-menstrual age"), "  (weeks)"))) +
+  ylab(expression(atop(bold("Advancement of temporal vascular front"), "(disc-to-fovea distance)")))
+
+```
+
+
+<br><br>
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width='90%'}
+
+px <- "106"
+
+d_ggplot %>% filter(ID==px) -> d_ggplot_single
+tx_df %>% filter(ID==px) -> tx_df_single
+
+tx_plot_single <- 
+    ggplot(d_ggplot_single, aes(x = age, y = TVL, colour=eye, shape=treatment,
+                         group=interaction(eye, treatment))) +  
+    geom_smooth(method = "lm", 
+                formula = y~x,
+                alpha=0.25) +  
+    geom_point(size=2.7) +
+    coord_cartesian(ylim = c(0, 8)) +
+    xlab("Postmenstrual age at scan (weeks)") +
+    ylab("Advancement of temporal vascular front\n(unit = disc-to-fovea distance)") +
+    custom_theme +
+    theme(aspect.ratio=0.8) +
+    scale_colour_manual(values= wes_palette("GrandBudapest1", n = 2)) +
+    geom_point(data = tx_df_single, aes(x = age, y = TVL), color="blue", size=3.5, shape=8) 
+
+
+#tiff(filename = "plot_individual1.tiff", width=3000, height=3000, res = 400)
+#tx_plot_single
+#dev.off()
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width='90%'}
+px <- "99"
+
+d_ggplot %>% filter(ID==px) -> d_ggplot_single
+tx_df %>% filter(ID==px) -> tx_df_single
+
+tx_plot_single2 <- 
+    ggplot(d_ggplot_single, aes(x = age, y = TVL, colour=eye, shape=treatment,
+                         group=interaction(eye, treatment))) +  
+    geom_smooth(method = "lm", 
+                formula = y~x,
+                alpha=0.25) +  
+    geom_point(size=2.7) +
+    coord_cartesian(ylim = c(0, 8)) +
+    xlab("Postmenstrual age at scan (weeks)") +
+    ylab("Advancement of temporal vascular front\n(unit = disc-to-fovea distance)") +
+    custom_theme +
+    theme(aspect.ratio=0.8) +
+    scale_colour_manual(values= wes_palette("GrandBudapest1", n = 2)) +
+    geom_point(data = tx_df_single, aes(x = age, y = TVL), color="blue", size=3.5, shape=8) 
+
+
+#tiff(filename = "plot_individual2.tiff", width=3000, height=3000, res = 400)
+tx_plot_single2
+#dev.off()
+```
+
+
+<br><br>
+
+
+Zooming in on one plot we see what we're doing in greater detail. I am fitting a separate regression line to OD and OS as well as before and after treatment. 
+
+
+Note: There is a gap between the point of treatment (blue dot) and the start of the post-treatment regression line as I have taken the beginning of the post-treatment data to be the first visit **after** treatment rather than using the treatment day as the first visit.
+
+
+
+
+<br><br>
+
+As per Caroline's great suggestion here is a plot of the slope values before and after anti-vegf shown two ways. The first is a violin plot with lines connecting each patient pre- to post- treatment which helps to show each patients trajectory. The second plot is a more traditional error bar plot:
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, out.width='100%'}
+# add slope column to dataframe. Go back to the original dataframes from Emer with the R & L on the ID labels
+d_slope <- d_later
+### add a slope column
+fitted_models = d_slope %>% group_by(ID,treatment) %>% do(model = lm(TVL ~ age, data = .)) 
+estimates <- fitted_models$model
+coef <- lapply(estimates, function (x) x[c('coefficients')])
+coef <- as.data.frame(coef)
+coef <- t(coef)
+coef <- as.data.frame(coef)
+slope <- data.frame(TVR=coef$age)
+slope <- cbind.data.frame(ID=fitted_models$ID, treatment=fitted_models$treatment, slope)
+### add slope to unique rows of df
+d_slope$age <- NULL
+d_slope$TVL <- NULL
+d_slope <- d_slope[!duplicated(d_slope), ]
+
+d2 <- merge(d_slope, slope, by= c("ID","treatment"))
+d_slope_f <- na.omit(d2)
+
+
+
+### check normality and homogeneity of variances
+#d_slope_f %>% group_by(treatment,eye) %>% normality(TVR) -> norm  
+#norm ## most are non-normally distributed
+#leveneTest(TVR ~ treatment*eye, d_slope_f) # variances are homogeneous so can use fischer's test but will use robust analysis due some extreme outliers
+
+  
+
+set.seed(4)
+d_slope_df <- d_slope_f[-c(4,5,6)]
+ # Now remove R & L labels from the ID column
+ d_slope_df$ID <- (gsub('[a-zA-Z]', '', d_slope_df$ID))
+ d_slope_df$ID <- factor(d_slope_df$ID)
+### relevel so pre comes first
+  #levels(d_slope_df$treatment)[1]
+  d_slope_df$treatment = relevel(d_slope_df$treatment, ref="pre")
+  
+  
+  d_slope_df %>%
+  #mutate(treatment = fct_reorder(treatment, TVR)) %>%
+  grouped_ggwithinstats(
+  #ggwithinstats(
+  grouping.var=eye,
+  x=treatment,
+  y=TVR,
+  type = "robust",
+  var.equal = F,
+  pairwise.display = T,
+  point.path=T,
+  mean.plotting=F,
+  centrality.plotting=T,
+  centrality.label.args="",
+  violin.args = list(width = 1, linewidth = 0.2, alpha=0.2),   # to remove violin plot
+  boxplot.args = list(width = 0),   # to remove boxplot
+  point.args=list(size=2.2),
+  xlab=c("Pre- or post- anti-VEGF"),
+  ylab=c(expression(atop(bold("Temporal vascularisation rate"), "(disc-to-fovea distance per week)"))),
+  p.adjust.method = "BH",
+  annotation.args = list(title = "TVR distributions pre- and post- anti-VEGF (Robust analysis)"),
+  plotgrid.args = list(nrow = 1),
+  title.args = list(size = 26, fontface = "bold"),
+  ggplot.component = scale_color_manual(values=c("#F8766D", "#00BFC4")),
+    ggtheme = ggplot2::theme_bw() + 
+    theme(axis.text.x=element_text(size=12, colour="black"),
+          axis.text.y=element_text(size=12, colour="black"),
+          axis.title.x= element_text(size=18),
+          axis.title.y= element_text(size=18),
+          plot.title = element_text(size = 20, face = "bold", hjust=0))
+) 
+  
+```
+
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ # Calculates mean, sd, se and IC
+dff <- d_slope_df %>%
+  group_by(treatment, eye) %>%
+  dplyr::summarise(
+          n=n(),
+          mean=mean(TVR),
+          sd=sd(TVR)
+  ) %>%
+  mutate( se=sd/sqrt(n))  %>%
+  mutate( ic=se * qt((1-0.05)/2 + .5, n-1))
+
+# Confidence Interval
+ dff %>%
+    ggplot() +
+        geom_point(aes(x=treatment, y=TVR, colour=eye), 
+                   data = d_slope_df, 
+                   position = position_jitterdodge(dodge.width = 0.4)
+                   ) +
+        geom_errorbar(aes(x=treatment, ymin=mean-ic, ymax=mean+ic, colour=eye), 
+                      width=0.4, alpha=0.9, linewidth=1.2,
+                      position = position_dodge(width = 0.4)
+                      ) +
+        geom_point(data=d_slope_df, aes(x=treatment, y=TVR, group=eye),
+                   stat = "summary", fun = "mean", 
+                   size=2, width=10, colour="gray35",
+                   position = position_dodge(width = 0.4)) +
+    xlab("Post-menstrual age (weeks)") +
+    ylab("Temporal vascularisation rate\n(disc-to-fovea distance per week)") +
+    custom_theme +
+    theme(axis.text.x=element_text(size=14, colour="black"),
+          axis.text.y=element_text(size=14, colour="black"),
+          axis.title.x= element_text(size=18),
+          axis.title.y= element_text(size=18),
+          plot.title = element_text(size = 20, face = "bold", hjust=0)) +
+    theme(aspect.ratio=0.8) +
+    scale_colour_manual(values= wes_palette("Darjeeling1", n = 2)) +
+        ggtitle("TVR distributions pre- and post- anti-VEGF (95% CI's)")
+
+
+
+
+
+```
+
+
+
+
+<br><br><br>
+
+
+
+### Linear mixed modelling
+
+
+<br>
+
+
+```{r include=FALSE}
+## refactor with 'pre' as the reference level
+d %>% mutate(treatment = treatment %>% fct_relevel("pre", "post")) -> d
+
+## form a model
+lmm1 <- lme4::lmer(TVL ~ age * treatment*eye + GA + BW + (age|ID/eye), data = d, REML = F)
+lmm2 <- lme4::lmer(TVL ~ age + treatment*eye + GA + BW + (age|ID/eye), data = d, REML = F)
+
+
+anova(lmm1,lmm2)    ## suggest not much effect by between models i.e. adding pre and post op data not useful
+compare_performance(lmm1,lmm2, rank=T)    ## This seems to suggest that lmm1 is better
+tab_model(lmm1)
+
+
+#### visualize - doesn't like the (age)
+lmm_test <- lme4::lmer(TVL ~ age * treatment + (age|ID), data=d)
+flexplot::visualize(lmm_test,
+                    #formula = TVL ~ age|treatment,
+                    sample=8, alpha=0.8, plot="model")
+
+```
+
+
+linear model:
+```{r, message=F, warning=F}
+lmm1@call$formula   
+```
+
+```{r include=FALSE}
+model_performance(lmm1)
+
+### check validity of model using performance package
+#check_model(lmm1)
+plot(check_normality(lmm1))
+plot(check_heteroscedasticity(lmm1))   ### SIGNIFICANT HETEROSCEDASTICITY
+check_heteroscedasticity(lmm1)
+check_outliers(d$TVL)
+
+#plot(check_outliers(d$TVL))
+#check_singularity(lmm1)   ### checks for model overfitting
+#### analyse residual to check for normality (needed for LMM - otherwise have to use GLMM)
+qqnorm(residuals(lmm1))
+hist(residuals(lmm1))             ## looks normally distributed
+```
+
+
+
+Fit robust model as we have 2 or 3 extreme outliers that are making the model exhibit significant heteroscedasticity.
+
+
+```{r message=FALSE, warning=FALSE}
+library(robustlmm)
+rlmm1 <- rlmer(TVL ~ age*treatment*eye + GA + BW + (age|ID/eye), data = d)
+#rlmm2 <- rlmer(TVL ~ age+treatment*eye + GA + BW + (age|ID/eye), data = d)
+
+#compare_performance(rlmm1, rlmm2, rank=T)
+#compare_performance(lmm1, rlmm1, rank=T)
+
+```
+
+
+
+
+<br>
+
+Robust model mitigates the effects of the outliers by applying a weighting to each patient. The model fits much better than a bayesian mixed model so lets proceed with the robust model.
+
+
+<br>
+
+Estimates from the robust model
+
+<br>
+
+```{r, message=F, warning=F}
+tab_model(rlmm1,
+          show.reflvl = T,
+          show.intercept = T,
+          digits = 4,
+          p.style = "numeric_stars",
+          p.adjust = "none")   # use "holm" if there are multiple comparisons
+
+```
+
+
+
+<br><br>
+
+From the 'age:treatmentpost:eyeOS' and 'age:treatmentpost' terms it appears that the slope differences between pre- and post- op are not significantly different to each other for the right or left eyes. i.e.
+
+
+<br>
+
+***
+
+TVR (rate of growth of temporal vessels) is no different after anti-vegf as before anti-vegf
+
+***
+
+
+Both robust and bayesian models agree that there is no significant difference in slopes pre- to post- treatment.
+
+
+
+
+<br><br><br>
+
+
+
+
+
+### Power Analysis
+
+<br>
+
+As we've discussed the above result of "no significant change in TVR after anti-VEGF" is a key finding of our work here. However, this could either be a null result or an insufficiently powered study. So to attempt to answer this (since a reviewer would surely question this), I am including a power calculation below.
+
+
+So we want look at whether we were sufficiently powered to say that the TVR (rate of growth of temporal vessels) is no different after anti-vegf as before anti-vegf. this is slightly more complicated than a usual power calculation since we are dealing with linear mixed models.
+
+
+p.s. the usual practice would be to perform a power calculation before performing an experiment and doing an analysis since doing post-hoc power calculations are shown to be nonsensical and lead to circular arguments. However, I think our case is somewhat unique in that we are asking what effect size (slope difference/TVR change) at 90% power and alpha=0.05 would lead to a rejection of the null model of no slope difference pre versus post antivegf?  When asking this question there are no circular arguments or logic flaws in performing the power calculation post-hoc (as far as I can tell). However, I would still avoid saying that it's post-hoc and put the analysis prior to the antivegf calcs since reviewers will probably not appreciate the subtle difference. 
+
+
+
+
+<br>
+
+
+```{r eval=FALSE, include=FALSE}
+library(simr)
+
+## here we run a model with just TVL vs age
+
+# see  https://humburg.github.io/Power-Analysis/simr_power_analysis.html  for explanation
+
+## optionally change levels
+#d$treatment <- factor(d$treatment, levels = c("pre","post"))
+
+model1 <- lme4::lmer(TVL ~ age*treatment + BW + GA + (age|ID/eye), data = d)
+
+sim_model1 <- powerSim(model1, nsim=100, test = fcompare(TVL~age+BW+GA), seed=55)
+sim_model1
+
+#length(unique(d$ID))
+
+### lets use the previous 3 group slopes to show that we would expect a slope change from group C to group A after treatment - this was a slope change of 0.0529
+summary(model1)
+tab_model(model1,
+          show.reflvl = T,
+          show.intercept = T,
+          digits = 4,
+          p.style = "numeric_stars",
+          p.adjust = "none")
+library(gtsummary)
+tbl_regression(model1, add_pairwise_contrasts=T)
+library(emmeans)
+em <- emtrends(model1, "treatment", var = "age")
+em
+pairs(em)
+
+
+### try the smallest value obtained from previous analysis (between groups A and B)
+fixef(model1)['age:treatmentpost'] <- 0.0214
+### try the smallest value obtained from previous analysis (between groups A and C)
+fixef(model1)['age:treatmentpost'] <- 0.0529
+### and now the largest value (between groups B and C)
+fixef(model1)['age:treatmentpost'] <- 0.0315
+### try the smallest value obtained from previous analysis (between groups AB and C)
+fixef(model1)['age:treatmentpost'] <- 0.0381
+### and now the smallest value taking CI's intervals of slopes into account (between groups AB and C)
+fixef(model1)['age:treatmentpost'] <- 0.0106
+
+### now finally experimenting with a few different effect sizes for age:treatmentpost this gives 90% power so can be used as the effect size reasonably detectable with the sample size we have. <- use this in the paper
+fixef(model1)['age:treatmentpost'] <- -0.00056  ## for a slope decline
+fixef(model1)['age:treatmentpost'] <- 0.0032   ## for a slope increase
+
+sim_treat_large <- powerSim(model1, nsim=100, test = fcompare(TVL~age+BW+GA), seed=54)
+sim_treat_large
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# model1_ext1 <- extend(model1, along="ID", n=50)
+# model1_ext1
+# sim_model1_ext1 <- powerSim(model1_ext1, nsim=50, test = fcompare(TVL~age))
+# sim_model1_ext1
+# p_curve_model1_ext1 <- powerCurve(model1_ext1, test=fcompare(TVL~age), 
+#                                   along="ID", breaks=c(10,20,30,40))
+# 
+# #tiff(filename = "power_curve.tiff", width=5000, height=4000, res = 600)
+# plot(p_curve_model1_ext1)
+# #dev.off()
+```
+
+
+
+
+
+
+
+
+<br><br>
+
+
+
+
+
+
+***
+
+update:-  Let's ignore the previous power calculation based on the slope analysis "pilot" study and reverse it by asking at 90% power, what reasonable change in slope can we hope to detect with the sample size we have and an alpha level = 0.05?
+Doing it this way round means we don't use any of the "pilot" data at all and simply ask what level of slope change is detectable at 90% power compared to a null model where there is no treatment effect at all. The power calculation I am performing here runs hundreds of simulations-based power analysis with lme4 mixed modelling in order to test the null hypothesis.
+
+
+Here I find that at 90% power we could detect a slope difference of 0.00334 post-antivegf compared to pre- antivegf. From the model1 summary, the TVR pre-antivegf is 0.1003, hence an change in TVR by 0.00334 represents a 3.3% change in slope.  Hence we can state that our sample size is sufficient to detect a 3.3% change in TVR pre- to post- antivegf at an alpha level of 0.05 with 90% power. Hence, the fact that we did not detect a slope change to statistical significance means that we cannot reject the null hypothesis and so cannot conclude that the slopes are the different pre- versus post-antivegf to within 3.3%. 
+
+***
+
+
+<br><br>
+
+
+
+
+
+
+

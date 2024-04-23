@@ -1,0 +1,1435 @@
+---
+title: "ROP - Temporal vessel growth - analysis"
+author: "Aman Josan"
+date: "`r format(Sys.time(), '%d/%m/%y')`"
+output:
+  html_document:
+    self_contained: yes
+  word_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{=html}
+<style>
+.column-left{
+  float: left;
+  width: 50%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 50%;
+  text-align: right;
+}
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = F,
+	message = FALSE,
+	warning = FALSE,
+	cache.rebuild = TRUE,
+	comment = NA
+)
+library(tidyverse)
+library(optmatch)
+library(openxlsx)
+library(readxl)
+library(lme4)
+library(stats)
+library(ggpmisc)
+library(effects)
+library(gtools)
+library(patchwork)
+library(here)
+library(flexplot)
+library(lmerTest)
+library(glmmTMB)
+library(interactions)
+library(sjPlot)
+library(jtools)
+library(performance)
+library(emmeans)
+library(kableExtra)
+library(caret)
+library(pROC)
+library(grid)
+library(randomForest)
+```
+
+<br><br>
+
+```{r, message=FALSE, warning=FALSE}
+
+tvl_train_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_1904_2.xlsx"), 
+                                        sheet = 1, 
+                                        range = "a1:h409", col_names = T))
+
+tvl_antivegf_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 antivegf clean.xlsx"), 
+                                        sheet = 1, 
+                                        range = "a1:n257", col_names = T))
+
+tvl_test_data_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 validation clean.xlsx"), 
+                                        sheet = 1, 
+                                        range = "a1:h95", col_names = T))
+
+```
+
+
+```{r include=FALSE}
+custom_theme <-  theme_bw() + 
+                 theme(axis.text.x=element_text(size=9, colour="black"),
+                       axis.text.y=element_text(size=9, colour="black"),
+                       axis.title=element_text(size=12,face="bold"), 
+                       strip.text.x = element_text(size = 12),
+                       #legend.position="none",
+                       panel.grid.major = element_blank(), 
+                       panel.grid.minor = element_blank(), 
+                       axis.line = element_line(colour="black"))
+```
+
+
+
+```{r, message=FALSE, warning=FALSE}
+## some data tidying
+tvl_train_data <- tvl_train_data_orig
+# convert "ID" and "ROP" columns to a factor
+tvl_train_data$ID <- as.factor(tvl_train_data$ID)
+tvl_train_data$ROP <- as.factor(tvl_train_data$ROP)
+# convert "eye" column back to OD (=0) and OS (=1)
+tvl_train_data$eye[tvl_train_data$eye==0] <- "OD"
+tvl_train_data$eye[tvl_train_data$eye==1] <- "OS"
+# then convert "eye" column to a factor
+tvl_train_data$eye <- as.factor(tvl_train_data$eye)
+# don't need "subject column as have ID column instead
+tvl_train_data$subject <- NULL
+
+```
+
+<br>
+
+Lets remove any patients with age \>40 weeks.
+
+
+<br>
+
+
+Recall: group A (no ROP) and group B (ROP not requiring treatment) and group C is ROP req. treatment (threshold ROP).
+
+<br>
+
+```{r}
+tvl_train_data %>% filter(age<40) -> d_orig
+
+```
+
+
+```{r include=FALSE}
+d_3groups <- d_orig
+# convert all group A and group B into a single group AB
+levels(d_3groups$ROP)[levels(d_3groups$ROP)=='A'] <- 'A'
+levels(d_3groups$ROP)[levels(d_3groups$ROP)=='B'] <- 'B'
+
+d_2groups <- d_orig
+# convert all group A and group B into a single group AB
+levels(d_2groups$ROP)[levels(d_2groups$ROP)=='A'] <- 'AB'
+levels(d_2groups$ROP)[levels(d_2groups$ROP)=='B'] <- 'AB'
+
+# remove R & L labels from the ID column
+d_3groups$ID <- (gsub('[a-zA-Z]', '', d_3groups$ID))
+d_2groups$ID <- (gsub('[a-zA-Z]', '', d_2groups$ID))
+d_3groups$ID <- factor(d_3groups$ID)
+d_2groups$ID <- factor(d_2groups$ID)
+
+d_2groups <- d_2groups[!is.na(d_2groups$TVL), ]
+d_3groups <- d_3groups[!is.na(d_3groups$TVL), ]
+# # remove R & L labels from the ID column just to see how many patients in each group
+# d_test <- d_2groups
+# d_test$ID <- (gsub('[a-zA-Z]', '', d_test$ID))
+# test <- d_test %>% filter(ROP=="C")
+# length(unique(test$ID))
+
+```
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+summary(d_3groups)
+summary(d_2groups)
+
+d_2groups %>% filter(ROP=="AB") -> testAB
+testAB <- testAB[!duplicated(testAB[c(1,3)]),]
+testAB$ID <- as.character(testAB$ID)
+summary(testAB)
+length(unique(testAB$ID))
+
+d_3groups %>% filter(ROP=="A") -> testA
+testA <- testA[!duplicated(testA[c(1,3)]),]
+testA$ID <- as.character(testA$ID)
+summary(testA)
+length(unique(testA$ID))
+
+d_3groups %>% filter(ROP=="B") -> testB
+testB <- testB[!duplicated(testB[c(1,3)]),]
+testB$ID <- as.character(testB$ID)
+summary(testB)
+length(unique(testB$ID))
+
+
+# (testAB$ID)
+# (testA$ID)
+# (testB$ID) ## px 70 & 74 are in both groups A and B
+```
+
+
+<br>
+
+
+## Linear mixed effect modelling
+
+
+<br>
+
+Fit a linear mixed effect model to compare TVL vs age across both the 2 group case (AB vs C) with ID number as the grouping (random) variable. This takes the repeated measures aspect into account by considering each patient regression individually as well as all the patients combined results as a whole
+
+
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(glmulti)
+library(flextable)
+glmer.glmulti <- function(formula, data, random = "", ...){
+      glmer(paste(deparse(formula),random), 
+            data = data, ...)
+  }
+
+names(d_3groups)
+#mixed_model <- glmulti_2_groups
+
+## try glmulti plackage to compare all possible models
+mixed_model <- glmulti(TVL ~ age+ROP+BW+GA,
+                       data   = d_2groups,
+                       random  = "+(age|ID/eye)",
+                       crit   = aicc,       # AICC corrected AIC for small samples
+                       level  = 2,          # 2 with interactions, 1 without
+                       method = "g",        # "d", or "h", or "g"
+                       family=gaussian(),
+                       marginality = F,
+                       confsetsize = 100,
+                       fitfunc = glmer.glmulti   # Type of model (LM, GLM etc.)
+)
+
+print(mixed_model)
+plot(mixed_model)
+weightable(mixed_model)[1:10,] %>%
+  regulartable() %>%       # beautifying tables
+  autofit()
+
+#tiff(filename = "plot1.tiff", width=2000, height=1500, res = 300)
+plot(mixed_model, type = "s", cex.names=0.5)
+#dev.off()
+```
+
+
+<br>
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#################  LMM  ##################
+
+### full model 1
+lmm1 <- lme4::lmer(TVL ~ age * ROP + (1|ID/eye) , data = d_2groups)
+### reduced model without age*ROP interaction term
+lmm2 <- lme4::lmer(TVL ~ age + ROP + (1|ID/eye) , data = d_2groups)
+## compare both to tells us if the ROP group interaction plays a sig role (i.e. tells us if the slope between the 3 ROP groups are sig diff from one other)
+#anova(lmm1, lmm2)    
+## p=0.02086 shows there is a sig diff. 
+## i.e. slopes of TVL vs age between the three different ROP groupings are significantly different from each other.
+
+### full model with random slopes
+lmm3 <- lme4::lmer(TVL ~ age * ROP + (age|ID/eye) , data = d_2groups)         
+### reduced models with random slopes
+lmm4 <- lme4::lmer(TVL ~ age + ROP + (age|ID/eye) , data = d_2groups)        
+## again, compare both to tells us if the ROP group interaction plays a sig role 
+#anova(lmm3, lmm4)
+## p=0.01471 again shows sig diff. i.e. when allowing intercept and slopes to vary freely, differences in TVL vs age slope across different ROP groupings are still significant over just including ROP grouping as a fixed effect term.
+
+## compare random intercept model to random intercept and slope model
+#anova(lmm1,lmm3)    ## compare full models (with interaction term)
+                    ## p=6.2e10-12 shows full model with random slope and intercept for each patient 
+                    ## fits the data best
+
+### so best model so far (lmm3) is the most complex one involving random intercepts, random slopes and an interaction term of age:ROP 
+
+#summary(lmm3)
+
+
+### Now experiment with different combos of GA and BW also
+### absolute full model with all terms present
+lmm5 <- lme4::lmer(TVL ~ age*ROP + BW + GA + (age|ID/eye) , data = d_2groups)
+### reduced model without BW fixed effects term
+lmm6 <- lme4::lmer(TVL ~ age*ROP + GA + (age|ID/eye) , data = d_2groups)
+### reduced model without GA fixed effects term
+lmm7 <- lme4::lmer(TVL ~ age*ROP + BW + (age|ID/eye) , data = d_2groups)
+
+## compare both to tells us if the ROP group interaction plays a sig role (i.e. tells us if the slope between the 3 ROP groups are sig diff from one other)
+#anova(lmm5, lmm6)    ## BW adds little to the model fit
+#anova(lmm5, lmm7)    ## GA adds little to the model fit
+#anova(lmm5, lmm3)    ## GA + BW doesn't add much to the model so according to this can exclude GA and BW to the model and just stick with lmm3
+
+```
+
+
+
+linear model 1:
+```{r, message=F, warning=F}
+lmm1@call$formula   
+```
+linear model 2:
+```{r, message=F, warning=F}
+lmm2@call$formula
+```
+linear model 3:
+```{r, message=F, warning=F}
+lmm3@call$formula
+```
+linear model 4:
+```{r, message=F, warning=F}
+lmm4@call$formula
+```
+linear model 5:
+```{r, message=F, warning=F}
+lmm5@call$formula
+```
+linear model 6:
+```{r, message=F, warning=F}
+lmm6@call$formula
+```
+linear model 7:
+```{r, message=F, warning=F}
+lmm7@call$formula
+```
+
+
+<br><br>
+
+
+Compare all the models and rank according to the best model fitting the data
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+compare <- compare_performance(lmm1, lmm2, lmm3, lmm4, lmm5,lmm6,lmm7, rank=T) 
+comparison_table <- compare %>%
+                        mutate(Performance_Score=as.numeric(Performance_Score)) %>%
+                        mutate_if(is.numeric, format, digits=2) %>%
+                        kbl(caption = "") %>%
+                        kable_classic(full_width = T, html_font = "Cambria", font_size=12) %>%
+                        kable_styling("striped")
+```
+
+
+```{r, out.width="100%", full_width = F}
+comparison_table %>% 
+  save_kable(file = "model_comparison_table.png", self_contained = T) 
+
+comparison_table
+```
+<br>
+
+
+
+
+***
+
+Model 3 comes out clearly on top here.
+
+***
+
+<br>
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+### absolute full model with all terms present
+lmm5_2groups <- lme4::lmer(TVL ~ age*ROP + (age|ID/eye), REML = T, data = d_2groups)
+lmm5_3groups <- lme4::lmer(TVL ~ age*ROP + (age|ID/eye), REML = T, data = d_3groups)
+
+#lmm5_2groups2 <- lme4::lmer(TVL ~ age+ROP + (age|ID/eye), REML = T, data = d_2groups)
+#anova(lmm5_2groups,lmm5_2groups2)
+### above shows that the interaction term is significant for both 3 groups and 2 groups
+
+#flexplot(TVL ~ age|ROP, data = d_2groups, method = "lm")
+
+
+# tab_model(lmm5_3groups,
+#           show.reflvl = T,
+#           show.intercept = T,
+#           p.style = "numeric_stars",
+#           p.adjust = "holm")   # use "holm" if there are multiple comparisons
+# 
+# tab_model(lmm5_2groups,
+#           show.reflvl = T,
+#           show.intercept = T,
+#           p.style = "numeric_stars",
+#           p.adjust = "holm")   # use "holm" if there are multiple comparisons
+
+```
+
+
+<br>
+
+The best model from AIC and BIC from all possible model comparisons including interactions is:
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+lmm5_2groups@call$formula
+```
+
+<br>
+
+
+model diagnostics (check assumptions)
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+### check validity of model using performance package
+#check_model(lmm3)
+#plot(check_normality(lmm5_2groups))
+hist(residuals(lmm3))             ## looks normally distributed
+plot(check_heteroscedasticity(lmm3))
+qqnorm(residuals(lmm3))
+```
+
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+check_heteroscedasticity(lmm3)
+check_outliers(d_2groups$TVL)
+```
+
+
+<br><br>
+
+
+Model diagnostics are all ok above. Proceed with gaussian distribution function.
+
+
+
+<br><br>
+
+#### Let's plot the best model showing both the 3 separate group and combined (AB) 2 group data and regression model  
+
+<br>
+
+::: row
+::: column-left
+```{r}
+# emmip(lmm5_3groups, ROP ~ age, cov.reduce = range, CIs = T) +
+#   scale_color_manual(values=c("springgreen4","royalblue3","firebrick4")) +
+#   xlab("PMA at visit (Weeks)") + 
+#   ylab("Advancement of temporal vascular front\n(unit = disc-to-fovea distance)") +
+#   custom_theme 
+
+lmm5_3groups %>% 
+  interactions::interact_plot(pred = age,
+                              modx = ROP,
+                              interval = TRUE,
+                              int.type = "confidence",
+                              plot.points = T,
+                              robust = F,
+                              colors = c("springgreen4","royalblue3","firebrick4"),
+                              point.alpha = 0.5,
+                              point.size = 1,
+                              legend.main = "ROP group"
+                              ) +
+  labs(x=(expression(paste(bold("Post-menstrual age"), " (weeks)")))) +
+  labs(y=(expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)")))) +
+  scale_x_continuous(breaks = round(seq(min(d_3groups$age), max(d_3groups$age+1), by = 1),0)) +
+  scale_y_continuous(breaks = round(seq(min(d_3groups$TVL), max(d_3groups$TVL), by = 0.5),1)) +
+  custom_theme +
+  theme(legend.position=c(0.1,0.85)) 
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+### Post-hoc to find which group pairs are sig different
+drop1(lmm5_3groups,test="Chisq")  ## omnibus test for the interaction term
+em1 <- emtrends(lmm5_3groups, "ROP", var = "age")
+em1
+pairs(em1) ## find which pairs are different if they are after tukey's correction
+```
+:::
+
+::: column-right
+```{r}
+# emmip(lmm5_2groups, ROP ~ age, cov.reduce = range, CIs = T) +
+#   geom_point(size=1.5) +
+#   scale_color_manual(values=c("springgreen4","firebrick4")) +
+#   xlab("PMA at visit (Weeks)") + 
+#   ylab("Advancement of temporal vascular front\n(unit = disc-to-fovea distance)") +
+#   custom_theme 
+
+lmm5_2groups %>% 
+  interactions::interact_plot(pred = age,
+                              modx = ROP,
+                              interval = TRUE,
+                              int.type = "confidence",
+                              plot.points = T,
+                              robust = F,
+                              colors = c("royalblue4","firebrick4"),
+                              point.alpha = 0.5,
+                              point.size = 1,
+                              legend.main = "ROP group"
+                              ) +
+  labs(x=(expression(paste(bold("Post-menstrual age"), " (weeks)")))) +
+  labs(y=(expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)")))) +
+  scale_x_continuous(breaks = round(seq(min(d_3groups$age), max(d_3groups$age+1), by = 1),0)) +
+  scale_y_continuous(breaks = round(seq(min(d_3groups$TVL), max(d_3groups$TVL), by = 0.5),1)) +
+  custom_theme +
+  theme(legend.position=c(0.1,0.87)) 
+```
+
+```{r}
+drop1(lmm5_2groups,test="Chisq")  ## omnibus test for the interaction term
+em2 <- emtrends(lmm5_2groups, "ROP", var = "age")
+em2
+pairs(em2)
+```
+:::
+:::
+
+<br>
+
+As we can see from above, slopes for groups A vs B and A vs C and B vs C are not significantly different to each other. 
+
+However, when combining groups A & B into one (AB), this combined group is significantly different to group C (pvalue of slope differences = 0.0392), but this is likely dominated by group A ("no ROP" group). Hence, we shall proceed with just the two groups, AB (no ROP or ROP not requiring tx - called "no/subthreshold ROP") & C (ROP requiring tx - called "threshold ROP").
+
+<br>
+
+Hence proceed with just the two groups: AB & C
+
+```{r include=FALSE}
+df <- d_orig
+# convert all group A and group B into a single group AB again
+levels(df$ROP)[levels(df$ROP)=='A'] <- 'AB'
+levels(df$ROP)[levels(df$ROP)=='B'] <- 'AB'
+
+df_f <- df
+```
+
+
+
+<br>
+
+including the older version of the above plot for the journal here
+
+<br>
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+### define a custom theme 
+library(viridis)
+library(ggpmisc)
+
+custom_theme <-  theme_bw() + 
+                 theme(axis.text.x=element_text(size=10, colour="black"),
+                       axis.text.y=element_text(size=10, colour="black"),
+                       axis.title=element_text(size=12,face="bold"), 
+                       strip.text.x = element_text(size = 12),
+                       legend.position="none",
+                       panel.grid.major = element_blank(), 
+                       panel.grid.minor = element_blank(), 
+                       axis.line = element_line(colour="black"))
+
+
+d_ggplot <- df_f
+
+new_order <- c("AB", "C")
+d_ggplot %>%
+  mutate(ROP = ROP %>% fct_relevel(new_order)) -> d_ggplot
+  levels(d_ggplot$ROP) <- c("Group AB = No ROP or type 2 ROP", "Group C = Type 1 ROP")
+  
+
+plot_temporal <- 
+    ggplot(d_ggplot, aes(x = age, y = TVL, colour=ID)) +   ## delete the colour=ID for B&W image
+    geom_line(aes(group=ID), linewidth=0.8) +
+    geom_point(aes(fill=as.factor(ID)), size=0.8) +
+    facet_wrap(~ROP, ncol = 1) +
+    scale_x_continuous(name = expression(paste(bold("Post-menstrual age"), " (weeks)")), limits = c(30,40)) +
+    scale_y_continuous(name = expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)")),limits=c(1,5.5)) +
+    custom_theme +
+    theme(aspect.ratio=0.5) +
+    scale_color_viridis(discrete = TRUE, option = "E") +
+    scale_fill_viridis(discrete = TRUE) 
+
+
+
+### interaction plots from interaction package.  Doesn't play nice with lme4 so re-model using lmerTest just for plotting purposes
+lmm3_plot_model <- lmerTest::lmer(TVL ~ age * ROP + (age|ID/eye) , data = df_f)  
+
+interact_plot <- interact_plot(lmm3_plot_model, pred = age, modx = ROP, 
+                               interval = T, 
+                               plot.points = T,
+                               point.size = 0.9,
+                               int.type = "confidence",
+                               main.title = "",
+                               xlim=c(0,45),
+                               legend.main = "ROP group"
+                               ) + 
+              labs(x=(expression(paste(bold("Post-menstrual age"), " (weeks)")))) +
+              labs(y=(expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)")))) +
+                               theme(panel.grid.major = element_blank(), 
+                                     panel.grid.minor = element_blank(), 
+                                     axis.line = element_line(colour="black")) +
+                              theme(aspect.ratio = 0.7)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+print(plot_temporal)
+#print(interact_plot)
+```
+
+
+
+<br><br><br><br>
+
+
+
+## Classification prediction model using tree/gradient boosting machine learning
+
+<br><br>
+
+So now that we know slope for ROP group AB is significantly diff to slope for group C, i.e. that the two groups do differ in their TVL measures over time, we can now investigate how to predict groups (AB or C) based on the predictors, BW, GA, TVL and age (specifically the TVL growth rate, i.e. TVL vs age slope - we call this temporal vessel growth rate "TVR").
+
+
+
+```{r eval=FALSE, include=FALSE}
+### let's visualize dataframe d to see how the vessel length of each patient is changing
+
+### look at ROP=C (ROP req tx)
+# d_select1 <- df[c(1:43),]
+# flexplot(TVL ~ age|ID, data = d_select1)
+# d_select2 <- df[c(44:72),]
+# flexplot(TVL ~ age|ID, data = d_select2)
+# d_select3 <- df[c(73:113),]
+# flexplot(TVL ~ age|ID, data = d_select3)
+# d_select4 <- df[c(114:145),]
+# flexplot(TVL ~ age|ID, data = d_select4)
+# 
+# 
+# ### look at ROP=AB (ROP not req tx)
+# d_select5 <- df[c(146:183),]
+# flexplot(TVL ~ age|ID, data = d_select5)
+# d_select6 <- df[c(184:230),]
+# flexplot(TVL ~ age|ID, data = d_select6)
+# d_select7 <- df[c(231:276),]
+# flexplot(TVL ~ age|ID, data = d_select7)
+# d_select8 <- df[c(277:352),]
+# flexplot(TVL ~ age|ID, data = d_select8)
+```
+
+<br>
+
+
+```{r}
+# add a simple TVL ~ age slope column to dataframe. Go back to the original dataframes from Emer with the R & L on the ID labels. 
+## NOTE:- our previous work here and the antivegf file looks at TVR being the coefficient if the linear mixed model whereas here TVR is manually fitted and evaluated as the coefficient of PMA (age). The two versions of the TVR calc are similar but slighty different. This one is more appropriate for predictions using gradient boosting since this TVR does not involve GA and BW at all so can be evaluated as a predictive measure independently. In all other instances TVR is calculated as the coefficient of PMA and controlling for GA and BW in the LMM. I guess since we are claculating TVR on a per patient basis here we are also controlling for GA and BW so I guess the two versions of TVR are probably the same?  
+
+### add a slope column
+df <- na.omit(df)
+fitted_models = df %>% group_by(ID) %>% do(model = lm(TVL ~ age, data = .)) 
+estimates <- fitted_models$model
+coef <- lapply(estimates, function (x) x[c('coefficients')])
+coef <- as.data.frame(coef)
+coef <- t(coef)
+coef <- as.data.frame(coef)
+slope <- data.frame(TVR=coef$age)
+slope <- cbind.data.frame(ID=fitted_models$ID, slope)
+### add slope to unique rows of df
+df$age <- NULL
+df$TVL <- NULL
+df <- df[!duplicated(df), ]
+
+d2 <- merge(df, slope, by= c("ID"))
+d_slope <- na.omit(d2)
+
+###################################################################################################################
+############## NOTE: we are calling the rate of growth of temporal vessels (or slope term) "TVR" ##################
+###################################################################################################################
+```
+
+
+
+
+<br><br>
+
+### Tree boosting
+
+------------------------------------------------------------------------
+
+ 
+
+<br>
+
+
+
+This section has been substantially updated. Previously, the predictions of the Random Forest model somewhat went against the finding of the linear mixed model above. specifically in the LMM above we found significant differences in TVR between groups AB vs group C, however, when I constructed a random forest based predictive model to take advantage of this difference in TVR, the RF model did not demonstrate that TVR was a good predictor at all.. in fact it appeared to be detrimental to predictions!  
+
+
+After some investigations I think I have identified the cause of this contradiction. I generally trust the LMM results over that of the RF since the LMM is a fully visible model built from the ground up whereas the RF predictive model is a bit of a black box. Hence I've gone back to the RF model to see what is going wrong with the predictive ability of TVR. 
+
+I've realised that the original RF model is perhaps not an accurate model as I somewhat ignored the repeated measures aspect of the data (right eye & left eyes taken from each patient), Whereas in the LMM I did take this into account. I originally ignored this aspect as it didn't seem like that there was an easy solution to using random forests for repeated measures data, however, after Caroline's mention of XGboost I went back and looked further into tree boosting as a possibility as it has been used to mitigate the random components of a model whilst boosting the fixed effects. 
+
+
+I have found a very useful package called GPboost which takes things a little further by combining tree boosting with grouped random effects (such that we can now use data from right and left eyes for each patient an take this repeated measures per patient into account).
+
+
+
+n.b. tree/gradient boosting is very similar to random forests except in random forest, trees are trained in parallel whereas in gradient/tree boosting, decision trees are trained sequentially, learning from one run to the next. 
+
+<br>
+
+Hence let's try to use GPboost (tree/gradient boosting) to construct a predictive gradient boosted model taking the repeated measures (nested) nature of the data into account and generate some AUC curves (or I guess it's actually AU curves).
+
+
+<br>
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(gpboost)
+
+gp_data <- d_slope
+gp_data$ID <- (gsub('[a-zA-Z]', '', gp_data$ID))
+## add intercept column
+#gp_data$intercept <- 1
+gp_data$ID <- as.factor(gp_data$ID)
+gp_data$ROP <- as.numeric(gp_data$ROP)-1
+#gp_data$ROP <- as.factor(gp_data$ROP)
+
+######## fit a GPmodel ##########
+#################################
+## fit the random effects part with a gaussian process (gp)
+gp_model1 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model2 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model3 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model4 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model5 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model6 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+gp_model7 <- GPModel(group_data = gp_data$ID, likelihood="bernoulli_probit")
+
+fixed1 <- model.matrix(ROP ~ TVR+GA+BW, data = gp_data)
+fixed2 <- model.matrix(ROP ~ GA+BW, data = gp_data)
+fixed3 <- model.matrix(ROP ~ BW+TVR, data = gp_data)
+fixed4 <- model.matrix(ROP ~ TVR, data = gp_data)
+fixed5 <- model.matrix(ROP ~ BW, data = gp_data)
+fixed6 <- model.matrix(ROP ~ GA, data = gp_data)
+fixed7 <- model.matrix(ROP ~ 1, data = gp_data)
+
+
+
+### try the gpboost function
+
+#The default optimizer for covariance parameters (hyperparameters) is
+#Nesterov-accelerated gradient descent.
+#This can be changed to, e.g., Nelder-Mead as follows:
+re_params <- list(optimizer_cov = "gradient_descent")
+gp_model1$set_optim_params(params=re_params)
+gp_model2$set_optim_params(params=re_params)
+gp_model3$set_optim_params(params=re_params)
+gp_model4$set_optim_params(params=re_params)
+gp_model5$set_optim_params(params=re_params)
+gp_model6$set_optim_params(params=re_params)
+gp_model7$set_optim_params(params=re_params)
+#Use trace = TRUE to monitor convergence:
+re_params <- list(trace = TRUE)
+```
+
+
+
+
+```{r eval=FALSE, include=FALSE}
+#########################################
+#### Determine optimal tuning parameters
+#########################################
+gp_model_tune <- gp_model3
+data_tune <- fixed3
+
+#--------------------Choosing tuning parameters----------------
+param_grid <- list("learning_rate" = c(1, 0.5, 0.1, 0.01, 0.001), 
+                   "min_data_in_leaf" = c(5,10,100,500),
+                   "max_depth" = c(1,2,3,5,10),
+                   "lambda_l2" = c(0,1,5,10)
+                   )
+other_params <- list(num_leaves = 2^10)
+
+#metrics <- list("metric"=c("l1","mse","nelder_mead","binary_logloss"))
+#metric = "l1"
+
+set.seed(123)
+opt_params <- gpb.grid.search.tune.parameters(param_grid = param_grid, params = other_params,
+                                              num_try_random = NULL, nfold = 4,
+                                              data = data_tune, gp_model = gp_model_tune, label = gp_data$ROP,
+                                              use_gp_model_for_validation = TRUE, verbose_eval = 1,
+                                              nrounds = 1000, early_stopping_rounds = 10)
+
+print(paste0("Best parameters: ",
+             paste0(unlist(lapply(seq_along(opt_params$best_params), 
+                                  function(y, n, i) { paste0(n[[i]],": ", y[[i]]) }, 
+                                  y=opt_params$best_params, 
+                                  n=names(opt_params$best_params))), collapse=", ")))
+print(paste0("Best number of iterations: ", opt_params$best_iter))
+print(paste0("Best score: ", round(opt_params$best_score, digits=3)))
+```
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Train model
+bst1 <- gpboost(data = fixed1, label = gp_data$ROP, gp_model = gp_model1, nrounds = 539,
+               learning_rate = 0.1, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=10, 
+               verbose = 1) 
+               #use_gp_model_for_validation = F, metric="l2")
+bst2 <- gpboost(data = fixed2, label = gp_data$ROP, gp_model = gp_model2, nrounds = 127, 
+               learning_rate = 0.5, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=1, 
+                verbose = 1)
+bst3 <- gpboost(data = fixed3, label = gp_data$ROP, gp_model = gp_model3, nrounds = 675,
+               learning_rate = 0.1, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=5, 
+               verbose = 1)
+bst4 <- gpboost(data = fixed4, label = gp_data$ROP, gp_model = gp_model4, nrounds = 100,
+               learning_rate = 0.1, min_data_in_leaf = 10, max_depth=2, seed=22, lambda_l2=0, 
+               verbose = 1)
+bst5 <- gpboost(data = fixed5, label = gp_data$ROP, gp_model = gp_model5, nrounds = 750,
+               learning_rate = 0.1, min_data_in_leaf = 5, max_depth=3, seed=22, lambda_l2=5, 
+               verbose = 1)
+bst6 <- gpboost(data = fixed6, label = gp_data$ROP, gp_model = gp_model6, nrounds = 77,
+               learning_rate = 0.5, min_data_in_leaf = 10, max_depth=1, seed=22, lambda_l2=1, 
+               verbose = 1)
+bst7 <- gpboost(data = fixed7, label = gp_data$ROP, gp_model = gp_model6, nrounds = 50,
+               learning_rate = 1, min_data_in_leaf = 500, max_depth=2, seed=22, lambda_l2=0, 
+               verbose = 1)
+
+
+# Make predictions
+pred1 <- predict(bst1, data = fixed1, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred2 <- predict(bst2, data = fixed2, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred3 <- predict(bst3, data = fixed3, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred4 <- predict(bst4, data = fixed4, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred5 <- predict(bst5, data = fixed5, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred6 <- predict(bst6, data = fixed6, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+pred7 <- predict(bst7, data = fixed7, group_data_pred=gp_data$ID,
+                predict_var = TRUE, pred_latent = T)
+
+
+#pred$mu # predicted latent mean
+#pred$var # predicted latent variance
+
+### actual ROP classifications
+actual <- d_slope$ROP
+actual <- as.numeric(actual)-1
+#actual <- as.factor(actual)
+
+
+roc_object1 <- roc(actual, pred1$fixed_effect, auc=T)
+roc_object2 <- roc(actual, pred2$fixed_effect, auc=T)
+roc_object3 <- roc(actual, pred3$fixed_effect, auc=T)
+roc_object4 <- roc(actual, pred4$fixed_effect, auc=T)
+roc_object5 <- roc(actual, pred5$fixed_effect, auc=T)
+roc_object6 <- roc(actual, pred6$fixed_effect, auc=T)
+roc_object7 <- roc(actual, pred7$fixed_effect, auc=T)
+# roc_object1 <- roc(actual, pred1$response_mean, auc=T)
+# roc_object2 <- roc(actual, pred2$response_mean, auc=T)
+# roc_object3 <- roc(actual, pred3$response_mean, auc=T)
+# roc_object4 <- roc(actual, pred4$response_mean, auc=T)
+# roc_object5 <- roc(actual, pred5$response_mean, auc=T)
+# roc_object6 <- roc(actual, pred6$response_mean, auc=T)
+
+
+
+```
+
+
+```{r, out.width="90%"}
+par(pty="s")
+{
+plot(roc_object1, col="darkblue", print.auc =F, main = "")
+plot(roc_object2, print.auc=F, col="darkred", add=TRUE, lty=3, lwd=4)
+#plot(roc_object3, print.auc=F, col="mistyrose4", add=TRUE, lty=2, lwd=2)
+plot(roc_object4, print.auc=F, col="darkgreen", add=TRUE, lty=2, lwd=2)
+#plot(roc_object5, print.auc=F, col="lightblue3", add=TRUE, lty=2, lwd=2)
+#plot(roc_object6, print.auc=F, col="orange", add=TRUE, lty=2, lwd=2)
+#plot(roc_object7, print.auc=F, col="yellow4", add=TRUE, lty=2, lwd=2)
+
+text(0.3, 0.25, paste("Model 3: (BW+GA+TVR)  AUC = ", round(roc_object1$auc, 2)), col="darkblue", cex=0.7)
+text(0.3, 0.3, paste("Model 2: (BW+GA)  AUC = ", round(roc_object2$auc, 2)), col="darkred", cex=0.7)
+#text(0.3, 0.25, paste("Model 3: (BW+TVR only)  AUC = ", round(roc_object3$auc, 2)), col="mistyrose4", cex=0.7)
+text(0.3, 0.35, paste("Model 1: (TVR only)  AUC = ", round(roc_object4$auc, 2)), col="darkgreen", cex=0.7)
+#text(0.1, 0.15, paste("Model 5: (BW only)  AUC = ", round(roc_object5$auc, 2)), col="lightblue3", cex=0.7)
+#text(0.1, 0.1, paste("Model 6: (GA only)  AUC = ", round(roc_object6$auc, 2)), col="orange", cex=0.7)
+#text(0.1, 0.05, paste("Model 7: (no covariates)  AUC = ", round(roc_object7$auc, 2)), col="yellow4", cex=0.7)
+} 
+
+```
+
+
+
+<br>
+
+
+### feature importance from GPboost (tree/gradient boosted) model
+
+<br>
+
+
+```{r}
+gpb_import <- gpb.importance(bst1, percentage = TRUE)
+
+percent_gain <- round(gpb_import$Gain * 100, digits = 2) 
+
+barplot(height = percent_gain,
+                  names.arg = gpb_import$Feature,
+                  horiz=TRUE,
+                  main="",
+                  col = c("lightblue4", "mistyrose4", "peachpuff3"),
+                  xlab = "model gain from feature %",
+                  ylab = "Predictor",
+                  las=2,
+                  xlim = c(0,70))
+```
+
+
+
+
+
+
+<br>
+
+So using gradient tree boosting rather than random forests takes the nested nature of the data into account in a similar way that the linear mixed modelling took the nesting into account. As such the results make much more sense that before (when I preformed a simple random forest).
+
+
+As before, this model again shows that BW is overwhelmingly the strongest predictor. Again, we also have TVR adding some contribution.  
+
+
+Hence, GA and TVR add very marginal benefits to the predictive model compared to just BW alone, however, GA and BW suffer from moderate collinearity (see VIF below), whereas, TVR is a relatively independent measure with little collinearity with BW or GA. Hence I think we can argue that it has great potential as an independent predictive biomarker for ROP classification.
+
+
+
+
+
+
+
+<br><br>
+
+
+### Predictions from gradient/tree boosted model
+
+<br>
+
+Let's use Emer's withheld dataset to make predictions to test the random forest model 
+
+<br>
+
+```{r include=FALSE}
+# add slope column to test dataframe. 
+
+test_df <- tvl_test_data_orig
+
+test_df$eye[test_df$eye==0] <- "OD"
+test_df$eye[test_df$eye==1] <- "OS"
+# then convert "eye" column to a factor
+test_df$eye <- as.factor(test_df$eye)
+
+# remove the FD disc columns
+test_df$`FD fovea centre-disc centre  distance (mm)` <- NULL
+test_df$`temporal-disc centre (mm)` <- NULL
+# rename columns to match the training dataset
+colnames(test_df) <- c("ID","eye","GA","BW","age","TVL")
+
+
+### add a slope column
+test_df <- na.omit(test_df)
+
+fitted_models2 = test_df %>% group_by(ID) %>% do(model = lm(TVL ~ age, data = .)) 
+estimates2 <- fitted_models2$model
+coef2 <- lapply(estimates2, function (x) x[c('coefficients')])
+coef2 <- as.data.frame(coef2)
+coef2 <- t(coef2)
+coef2 <- as.data.frame(coef2)
+slope2 <- data.frame(TVR=coef2$age)
+slope2 <- cbind.data.frame(ID=fitted_models2$ID, slope2)
+### add slope to unique rows of df
+test_df$age <- NULL
+test_df$TVL <- NULL
+test_df <- test_df[!duplicated(test_df), ]
+
+test_df <- merge(test_df, slope2, by= c("ID"))
+test_df <- na.omit(test_df)
+
+test_df$ID <- (gsub('[a-zA-Z]', '', test_df$ID))
+
+test_df$GA <- round(test_df$GA, digits = 2)
+test_df$TVR <- round(test_df$TVR, digits = 2)
+
+```
+
+
+
+(Note:- we are removing patient 85 due to their complex nature (as per Kanmin's suggestion) )
+
+ 
+```{r}
+test_df <- test_df[!grepl("85", test_df$ID),]
+```
+
+```{r}
+actual_result <- c("AB","AB","AB","AB","AB","AB","AB","AB","AB","C","C","C","AB",
+                   "AB","AB","C","C","AB","AB","AB","AB","AB","C","AB","AB","AB","AB","AB",
+                   "AB","AB","C","C")
+
+actual_result <- as.factor(actual_result)
+
+#summary(df_alldata$ROP)
+```
+
+
+<br>
+
+
+```{r include=FALSE}
+##### Generate ROC curves for the 3 cases where RF model has BW+GA+TVR vs GA+BW vs TVR only
+fixed1 <- model.matrix( ~ TVR+GA+BW, data = test_df)
+fixed2 <- model.matrix( ~ GA+BW, data = test_df)
+fixed3 <- model.matrix( ~ BW+TVR, data = test_df)
+fixed4 <- model.matrix( ~ TVR, data = test_df)
+fixed5 <- model.matrix( ~ BW, data = test_df)
+
+
+predictions1 <- predict(bst1, 
+                data = fixed1,
+                group_data_pred=test_df$ID,
+                pred_latent = T,
+                )
+predictions2 <- predict(bst2,
+                data = fixed2,
+                group_data_pred=test_df$ID,
+                pred_latent = T,
+                )
+predictions3 <- predict(bst3,
+                data = fixed3,
+                group_data_pred=test_df$ID,
+                pred_latent = T,
+                )
+predictions4 <- predict(bst4,
+                data = fixed4,
+                group_data_pred=test_df$ID,
+                pred_latent = T,
+                )
+predictions5 <- predict(bst5,
+                data = fixed5,
+                group_data_pred=test_df$ID,
+                pred_latent = T,
+                )
+
+
+predicted_classes1 <- ifelse(predictions1$fixed_effect < -0.2, "AB", "C")
+predicted_classes1 <- as.factor(predicted_classes1)
+cm1 <- confusionMatrix(predicted_classes1, actual_result)
+
+predicted_classes2 <- ifelse(predictions2$fixed_effect < -0.9, "AB", "C")
+predicted_classes2 <- as.factor(predicted_classes2)
+cm2 <- confusionMatrix(predicted_classes2, actual_result)
+
+predicted_classes3 <- ifelse(predictions3$fixed_effect < 0.5, "AB", "C")
+predicted_classes3 <- as.factor(predicted_classes3)
+cm3 <- confusionMatrix(predicted_classes3, actual_result)
+
+predicted_classes4 <- ifelse(predictions4$fixed_effect < -0.8, "AB", "C")
+predicted_classes4 <- as.factor(predicted_classes4)
+cm4 <- confusionMatrix(predicted_classes4, actual_result)
+
+predicted_classes5 <- ifelse(predictions5$fixed_effect < 1.2, "AB", "C")
+predicted_classes5 <- as.factor(predicted_classes5)
+cm5 <- confusionMatrix(predicted_classes5, actual_result)
+```
+
+```{r echo=FALSE}
+names(test_df)[names(test_df) == 'GA'] <- "GA (weeks)"
+names(test_df)[names(test_df) == 'BW'] <- 'BW (g)'
+names(test_df)[names(test_df) == 'TVR'] <- 'TVR (D-F/week)'
+
+results <- cbind.data.frame(test_df, 
+                            "Actual ROP \ngroup" = actual_result,
+                            "TVR only" = predicted_classes4,
+                            "BW+GA" = predicted_classes2,
+                            "Prediction Model\n(BW+GA+TVR)" = predicted_classes1
+                            #"BW+TVR" = predicted_classes3,
+                            #"BW" = predicted_classes5
+                            )
+rownames(results) <- NULL
+
+library(flextable)
+
+# results %>% 
+#   kbl(caption = "Predictions on test dataset") %>%
+#   kable_classic(full_width = T, html_font = "Cambria", font_size=12) %>%
+#   kable_styling("striped") %>% 
+#   row_spec(0:nrow(results), align = "c") 
+
+results %>%
+  flextable()%>% theme_box() %>% autofit() %>%
+  theme_zebra() %>% align(align = "center") %>%
+  height(height=0.2, part = "body", unit = "in") #%>%
+#  save_as_docx(path = "table.docx")
+```
+
+
+```{r}
+library(gt)
+bal_acc_tbl <- 
+  tibble(
+    Model = c("TVR","BW+GA","BW+GA+TVR"),
+    Balanced_Accuracy = c(round(cm4$byClass[11], digits = 2),
+                          round(cm2$byClass[11], digits = 2),
+                          round(cm1$byClass[11], digits=2)
+                          )
+    )
+gt(bal_acc_tbl)
+```
+
+BW+GA+TVR
+```{r out.width="50%"}
+cm1
+```
+BW+GA
+```{r out.width="50%"}
+cm2$table
+```
+BW+TVR
+```{r out.width="50%"}
+cm3$table
+```
+TVR
+```{r out.width="50%"}
+cm4$table
+```
+BW
+```{r out.width="50%"}
+cm5$table
+```
+
+
+
+
+
+
+
+<br><br><br>
+
+
+### Checking for multicollinearity using variable inflation factor 
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(car)
+# remove R & L labels from the ID column
+d_vif <- d_slope
+d_vif$ID <- (gsub('[a-zA-Z]', '', d_vif$ID))
+d_vif$ID <- factor(d_vif$ID)
+
+
+model <- glmer(ROP ~ TVR + BW + GA + (1|ID), 
+                      family=binomial(link='logit'), 
+                      data=d_vif,
+                      control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e5))
+                      ) 
+
+# Calculating VIF
+vif_values <- vif(model)
+vif_values
+
+# Visualizing VIF
+barplot(vif_values, col = "skyblue", main = "Variance Inflation Factor (VIF)")
+
+```
+
+
+n.b. VIF=1 is considered insignificant for multicollinearity, VIF<2.5 is considered moderate and VIF>2.5 is considered very significant.
+
+<br>
+
+
+in keeping with the VIF analysis above let's look at the correlation coefficients for the pairwise variable comparisons
+
+<br>
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Creating a correlation matrix
+cor_matrix <- cor(d_vif[c("BW", "GA", "TVR")])
+
+# pairwise correlation analysis
+# exclude response variable (BP)
+cor(d_vif[ , -(1:3)])
+
+# load package
+library(corrplot)
+# visualize pairwise correlation
+corrplot(cor(d_vif[ , -(1:3)]), type = "upper")
+
+```
+
+
+<br>
+
+
+We can see from the above and the variable inflation analysis (VIF) analysis that TVR is not significantly correlated to GA or BW implying that there is no significant multicollinearity involving TVR.  BW and GA are fairly well correlated implying that perhaps we could throw GA away in favour of BW alone, however, when I try this the predictions do not work well at all. It seems to confirm that BW, GA and TVR are all independently contributing significantly to the prediction algorithm.
+
+
+
+
+
+
+
+
+
+<br><br><br>
+
+
+
+
+
+
+Quick check on nasal vessel lengths to show tvl and nvl slopes are not significantly different from each other
+
+<br>
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+tvl_nvl_data <- suppressMessages(read_excel(("../data/data_v3.0/ROP data for r 130032023_ incl nasal.xlsx"), 
+                                        sheet = 2, 
+                                        range = "a1:h370", 
+                                        col_names = T))
+
+
+dd <- tvl_nvl_data
+dd[c(1,2,3)] <- lapply(dd[c(1,2,3)], as.factor)
+
+lmm_nvl <- lme4::lmer(TVL ~ NVL + (1|ID/laterality), REML = T, data = dd)
+tab_model(lmm_nvl,
+          show.reflvl = T,
+          show.intercept = T,
+          p.style = "numeric_stars",
+          p.adjust = "holm")   # use "holm" if there are multiple comparisons
+
+
+
+  #### analyse residual to check for normality (needed for LMM - otherwise have to use GLMM)
+#  qqnorm(residuals(lmm_nvl))
+#  hist(residuals(lmm_nvl))             ## looks normally distributed apart from a couple of outliers
+  
+  ### NB.  USE JTOOLS TO MORE EASILY OBTAIN THE PSEUDO r^2 AND P-VALUES
+  stats <- summ(lmm_nvl)
+  p_value <- formatC(stats$coeftable[2,5] , digits = 3)
+  textPart <- "paste(italic(p), \" =\")" 
+  rsq <- formatC(attr(summ(lmm_nvl), "rsq")[[2]] ,digit = 2)
+  ### equation of line coeff
+  intercept <- formatC(stats$coeftable[1,1] , digits = 3)
+  gradient <- formatC(stats$coeftable[2,1] , digits = 3)
+  
+  
+  #######  plot
+  TVL_NVL_plot <- flexplot(TVL~NVL, data=dd, method = "lm") +
+    geom_point(size=2.5) +    
+    annotate("text", x = 1.7, y=4.7, label = paste0("R[italic(cond)] ^ 2 ==", rsq, sep=""), size = 5, parse=TRUE) +
+    annotate("text", x = 1.7, y=4.4, label = paste0("italic(p)", "<0.001"), size = 5, parse=TRUE) +
+
+    #annotate("text", x = 40, y=20,  label = paste("y =", intercept, "+", gradient, "x",  sep=""), size = 8 , parse=F) +
+    xlab(expression(paste(bold("Post-menstrual age"), " (weeks)"))) + 
+    ylab(expression(atop(bold("Advancement of temporal vascular front"), "(unit = disc-to-fovea distance)"))) +
+    custom_theme + theme(plot.margin=grid::unit(c(0,0,0,0), "mm")) +
+    theme(aspect.ratio=1) 
+  
+  TVL_NVL_plot
+  
+  
+  
+  
+
+
+# ## check AB vs C sample sizes as per Emer's email regarding a discrepency
+# AB_C_data <- suppressMessages(read_excel(("../data/data_v3.0/ROP vessel growth rate march 2024.xlsx"), 
+#                                         sheet = 2, 
+#                                         range = "a1:h370", col_names = T))
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# add slope column to TVL and NVL dataframes separately since data is incomplete. 
+TVR_NVR_data <- dd
+names(TVR_NVR_data)[names(TVR_NVR_data) == "laterality"] <- "eye"
+
+# rename ID values to something more simple
+TVR_NVR_data <- TVR_NVR_data %>%
+  mutate(ID = as.numeric(factor(ID, levels = unique(ID))))
+
+# remove patient eyes that have only 2 observations of TVL or NVL
+TVR_NVR_data <- TVR_NVR_data %>% 
+                group_by(ID,eye,GA,BW) %>%
+                filter(n()>2)
+
+# merge ID and eye columns
+TVR_NVR_data$ID <- paste0(TVR_NVR_data$ID, TVR_NVR_data$eye)
+TVR_NVR_data$ID <- as.factor(TVR_NVR_data$ID)
+
+
+
+###########################
+### add a TVR slope column
+###########################
+TVR_data <- TVR_NVR_data[-c(8)]
+TVR_data <- na.omit(TVR_data)
+fitted_models3 = TVR_data %>% group_by(ID) %>% do(model = lm(TVL ~ age, data = .)) 
+estimates3 <- fitted_models3$model
+coef3 <- lapply(estimates3, function (x) x[c('coefficients')])
+coef3 <- as.data.frame(coef3)
+coef3 <- t(coef3)
+coef3 <- as.data.frame(coef3)
+slope3 <- data.frame(TVR=coef3$age)
+slope3 <- cbind.data.frame(ID=fitted_models3$ID, slope3)
+### add slope to unique rows of df
+TVR_data$TVL <- NULL
+TVR_data <- TVR_data[!duplicated(TVR_data), ]
+TVR_data <- merge(TVR_data, slope3, by= c("ID"))
+TVR_data <- na.omit(TVR_data)
+TVR_data$ID <- (gsub('[a-zA-Z]', '', TVR_data$ID))
+
+############################
+### add an NVR slope column
+############################
+NVR_data <- TVR_NVR_data[-c(7)]
+NVR_data <- na.omit(NVR_data)
+fitted_models4 = NVR_data %>% group_by(ID) %>% do(model = lm(NVL ~ age, data = .)) 
+estimates4 <- fitted_models4$model
+coef4 <- lapply(estimates4, function (x) x[c('coefficients')])
+coef4 <- as.data.frame(coef4)
+coef4 <- t(coef4)
+coef4 <- as.data.frame(coef4)
+slope4 <- data.frame(NVR=coef4$age)
+slope4 <- cbind.data.frame(ID=fitted_models4$ID, slope4)
+### add slope to unique rows of df
+NVR_data$NVL <- NULL
+NVR_data <- NVR_data[!duplicated(NVR_data), ]
+NVR_data <- merge(NVR_data, slope4, by= c("ID"))
+NVR_data <- na.omit(NVR_data)
+NVR_data$ID <- (gsub('[a-zA-Z]', '', NVR_data$ID))
+
+
+## now merge TVR_data and NVR_data by ID and age columns
+test1 <- merge(TVR_data, NVR_data, by=c("ID","eye","GA","BW","age"), all = F) # NA's match
+test1 <- test1[c(1:4,7,9)]
+TVR_NVR_data2 <- test1[!duplicated(test1), ]
+TVR_NVR_data2$ID <- as.factor(TVR_NVR_data2$ID)
+
+TVR_NVR_data$ID <- (gsub('[a-zA-Z]', '', TVR_NVR_data$ID))
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+### now plot TVR vs NVR for OD
+lm1_df_OD <- TVR_NVR_data2 %>% filter(eye=="Right")
+lmm_TVR_NVR_OD <- lm(TVR ~ NVR, REML = T, data = lm1_df_OD)
+check_model(lmm_TVR_NVR_OD)
+anova(lmm_TVR_NVR_OD)
+cor.test(lm1_df_OD$TVR, lm1_df_OD$NVR,method="pearson")
+tab_model(lmm_TVR_NVR_OD,
+          show.reflvl = T,
+          show.intercept = T,
+          p.style = "numeric_stars",
+          p.adjust = "holm")   # use "holm" if there are multiple comparisons
+  
+  ### NB.  USE JTOOLS TO MORE EASILY OBTAIN THE PSEUDO r^2 AND P-VALUES
+  stats <- summ(lmm_TVR_NVR_OD)
+  p_value <- formatC(stats$coeftable[2,4] , digits = 2)
+  textPart <- "paste(italic(p), \" =\")" 
+  rsq <- formatC(attr(summ(lmm_TVR_NVR_OD), "rsq")[[1]] ,digit = 2)
+  ### equation of line coeff
+  intercept <- formatC(stats$coeftable[1,1] , digits = 3)
+
+  ######################
+  #######  plot ########
+  TVR_NVR_plot_OD <- 
+    ggplot(data=lm1_df_OD, aes(x=NVR, y=TVR)) +
+    geom_smooth(method = "lm") +
+    geom_point(size=2.5) +    
+    annotate("text", x = 0.1, y=0.28, label = paste0("R^ 2 ==", rsq, sep=""), 
+             size = 5, parse=TRUE) +
+    annotate("text", x = 0.1, y=0.25, label = paste0("italic(p)==", "0.047"), 
+             size = 5, parse=TRUE) +
+    xlab("NVR (D-F/week)") + 
+    ylab("TVR (D-F/week)") +
+    ggtitle("OD") +
+    custom_theme + theme(plot.margin=grid::unit(c(0,0,0,0), "mm")) +
+    theme(aspect.ratio=1) 
+  
+  
+  
+### and for OS
+lm1_df_OS <- TVR_NVR_data2 %>% filter(eye=="Left")
+lmm_TVR_NVR_OS <- lm(TVR ~ NVR, REML = T, data = lm1_df_OS)
+check_model(lmm_TVR_NVR_OS)
+anova(lmm_TVR_NVR_OS)
+cor.test(lm1_df_OS$TVR, lm1_df_OS$NVR,method="pearson")
+tab_model(lmm_TVR_NVR_OS, 
+          show.reflvl = T,
+          show.intercept = T,
+          p.style = "numeric_stars",
+          p.adjust = "holm")   # use "holm" if there are multiple comparisons
+  
+  ### NB.  USE JTOOLS TO MORE EASILY OBTAIN THE PSEUDO r^2 AND P-VALUES
+  stats <- summ(lmm_TVR_NVR_OS)
+  p_value <- formatC(stats$coeftable[2,4] , digits = 2)
+  textPart <- "paste(italic(p), \" =\")" 
+  rsq <- formatC(attr(summ(lmm_TVR_NVR_OS), "rsq")[[1]] ,digit = 2)
+  ### equation of line coeff
+  intercept <- formatC(stats$coeftable[1,1] , digits = 3)
+
+  ######################
+  #######  plot ########
+  TVR_NVR_plot_OS <- 
+    ggplot(data=lm1_df_OS, aes(x=NVR, y=TVR)) +
+    geom_smooth(method = "lm") +
+    geom_point(size=2.5) +    
+    annotate("text", x = -0.1, y=0.28, label = paste0("R^ 2 ==", rsq, sep=""), 
+             size = 5, parse=TRUE) +
+    annotate("text", x = -0.1, y=0.23, label = paste0("italic(p)==", "0.048"), 
+             size = 5, parse=TRUE) +
+    xlab("NVR (D-F/week)") + 
+    ylab("") +
+    ggtitle("OS") +
+    custom_theme + theme(plot.margin=grid::unit(c(0,0,0,0), "mm")) +
+    theme(aspect.ratio=1) 
+
+patch_plots <- (TVR_NVR_plot_OD + TVR_NVR_plot_OS) 
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+patch_plots
+```
+

@@ -21,4 +21,3 @@ Rmarkdown files with analysis supplemental to submitted manuscript
 ![unnamed-chunk-11-1](https://github.com/amanasj/ROP-prediction-from-vascularisation-rates/assets/67763567/7e4e84f5-7200-40cb-b314-f9e3fff8a451)
 
 
-![unnamed-chunk-13-1](https://github.com/amanasj/ROP-prediction-from-vascularisation-rates/assets/67763567/e6502a16-981d-4cc8-adf7-b683c1d81c12)

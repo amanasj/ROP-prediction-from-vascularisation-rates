@@ -479,7 +479,7 @@ d_slope_df <- d_slope_f[-c(4,5,6)]
 
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE}
- # Calculates mean, sd, se and IC
+ # Calculates mean, sd, se and CI's
 dff <- d_slope_df %>%
   group_by(treatment, eye) %>%
   dplyr::summarise(

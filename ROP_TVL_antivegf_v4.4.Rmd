@@ -74,9 +74,9 @@ library(wesanderson)
 
 ```{r, message=FALSE, warning=FALSE}
 
-df_orig <- suppressMessages(read_excel(("../data/data_v3.0/ROP_070224 antivegf clean.xlsx"), 
+df_orig <- suppressMessages(read_excel(("XXXXXXX.xlsx"),
                                         sheet = 1, 
-                                        range = "a1:n257", col_names = T))
+                                        range = "a1:n258", col_names = T))
 
 ```
 
@@ -150,7 +150,7 @@ d$treatment <- factor(d$treatment)
 
 
 ```{r include=FALSE}
-### Some data manipulation to label the pre vs post points properly
+### Some data arranging to label the pre vs post points properly
 ####################################################################################################
 ### add another treatment column (tx) but this time 0=pre 1=post and make the day of treatment = 1
 d$tx <- ""
@@ -396,7 +396,7 @@ Note: There is a gap between the point of treatment (blue dot) and the start of 
 
 <br><br>
 
-As per Caroline's great suggestion here is a plot of the slope values before and after anti-vegf shown two ways. The first is a violin plot with lines connecting each patient pre- to post- treatment which helps to show each patients trajectory. The second plot is a more traditional error bar plot:
+Here is a plot of the slope values before and after anti-vegf shown two ways. The first is a violin plot with lines connecting each patient pre- to post- treatment which helps to show each patients trajectory. The second plot is a more traditional error bar plot:
 
 <br>
 
@@ -651,13 +651,13 @@ Both robust and bayesian models agree that there is no significant difference in
 
 <br>
 
-As we've discussed the above result of "no significant change in TVR after anti-VEGF" is a key finding of our work here. However, this could either be a null result or an insufficiently powered study. So to attempt to answer this (since a reviewer would surely question this), I am including a power calculation below.
+As we've discussed the above result of "no significant change in TVR after anti-VEGF" is a key finding of our work here. However, this could either be a null result or an insufficiently powered study. So to attempt to answer this I am including a power calculation below.
 
 
 So we want look at whether we were sufficiently powered to say that the TVR (rate of growth of temporal vessels) is no different after anti-vegf as before anti-vegf. this is slightly more complicated than a usual power calculation since we are dealing with linear mixed models.
 
 
-p.s. the usual practice would be to perform a power calculation before performing an experiment and doing an analysis since doing post-hoc power calculations are shown to be nonsensical and lead to circular arguments. However, I think our case is somewhat unique in that we are asking what effect size (slope difference/TVR change) at 90% power and alpha=0.05 would lead to a rejection of the null model of no slope difference pre versus post antivegf?  When asking this question there are no circular arguments or logic flaws in performing the power calculation post-hoc (as far as I can tell). However, I would still avoid saying that it's post-hoc and put the analysis prior to the antivegf calcs since reviewers will probably not appreciate the subtle difference. 
+p.s. the usual practice would be to perform a power calculation before performing an experiment and doing an analysis since doing post-hoc power calculations are shown to be nonsensical and lead to circular arguments. However, I think our case is somewhat unique in that we are asking what effect size (slope difference/TVR change) at 90% power and alpha=0.05 would lead to a rejection of the null model of no slope difference pre versus post antivegf?  When asking this question there are no circular arguments or logic flaws in performing the power calculation post-hoc.
 
 
 
@@ -747,8 +747,8 @@ sim_treat_large
 
 ***
 
-update:-  Let's ignore the previous power calculation based on the slope analysis "pilot" study and reverse it by asking at 90% power, what reasonable change in slope can we hope to detect with the sample size we have and an alpha level = 0.05?
-Doing it this way round means we don't use any of the "pilot" data at all and simply ask what level of slope change is detectable at 90% power compared to a null model where there is no treatment effect at all. The power calculation I am performing here runs hundreds of simulations-based power analysis with lme4 mixed modelling in order to test the null hypothesis.
+We ask the question: at 90% power, what reasonable change in slope can we hope to detect with the sample size we have and an alpha level = 0.05?
+i.e. what level of slope change is detectable at 90% power compared to a null model where there is no treatment effect at all. The power calculation I am performing here runs hundreds of simulations-based power analysis with lme4 mixed modelling in order to test the null hypothesis.
 
 
 Here I find that at 90% power we could detect a slope difference of 0.00334 post-antivegf compared to pre- antivegf. From the model1 summary, the TVR pre-antivegf is 0.1003, hence an change in TVR by 0.00334 represents a 3.3% change in slope.  Hence we can state that our sample size is sufficient to detect a 3.3% change in TVR pre- to post- antivegf at an alpha level of 0.05 with 90% power. Hence, the fact that we did not detect a slope change to statistical significance means that we cannot reject the null hypothesis and so cannot conclude that the slopes are the different pre- versus post-antivegf to within 3.3%. 

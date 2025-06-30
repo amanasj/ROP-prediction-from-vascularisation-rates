@@ -1,6 +1,8 @@
 ######################## ROP-prediction-from-vascularisation-rates ##############################
 
-Use of the following code in publications is permitted on condition that a citation of the authors journal submission doi:https://doi.org/10.1016/j.ajo.2025.02.040 is provided:
+Use of the following code in publications is permitted on condition that a citation of the authors journal submission https://doi.org/10.1016/j.ajo.2025.02.040 is provided.
+
+<br>
 
 "Ultra-widefield imaging-based prediction of retinopathy of prematurity outcomes: a novel approach using temporal vascularisation rate" by Emer Chang, Amandeep Josan, Ravi Purohit, Sher A Aslam, Caroline Hartley, Chetan K Patel, Kanmin Xue
 
